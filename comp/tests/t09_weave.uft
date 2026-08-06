@@ -1,0 +1,18 @@
+; t09 weave: non-fanout DAG, multi-input tasks, fanout with broadcast input
+; 1. plain DAG, multi-input task
+weave
+  task a 1 2 add endt
+  task b 10 20 add endt
+  a b task c add endt
+wrun
+"%d\n" print drop            ; expect 33
+
+; 2. fanout: first input drives, second input broadcast
+weave
+  task items 1 6 range endt
+  task base 100 endt
+  items base 4 task work add endt
+wrun
+dup len "%d\n" print drop    ; expect 5
+sort dup 0 get "%d\n" print drop   ; expect 101
+4 get "%d\n" print drop            ; expect 105

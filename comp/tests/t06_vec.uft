@@ -1,0 +1,50 @@
+; build arr [0..9]
+0 10 range lst!
+lst@ len arr int a!
+lst@ len 'cp for
+jmp go
+cp: k! lst@ k@ get a@ swp k@ swp set ret
+go:
+a@ 2 vadd vsum "%d\n" print drop
+a@ vsum "%d\n" print drop
+a@ vmean "%f\n" print drop
+a@ vmin "%d\n" print drop
+a@ vmax "%d\n" print drop
+a@ dup veadd vsum "%d\n" print drop
+a@ dup vemul vsum "%d\n" print drop
+a@ 1 vadd dup vediv vsum "%d\n" print drop
+a@ 5 veq vcount "%d\n" print drop
+a@ 4 vgt vcount "%d\n" print drop
+a@ 4 vgt a@ 7 vlt vand vcount "%d\n" print drop
+a@ dup 4 vgt vgather vsum "%d\n" print drop
+a@ 5 vge vnot vcount "%d\n" print drop
+a@ 4 vgt a@ 7 vlt vor vcount "%d\n" print drop
+a@ 'sq vmap vsum "%d\n" print drop
+a@ 0 'acc vfold "%d\n" print drop
+jmp over
+sq: dup mul ret
+acc: add ret
+over:
+; float arr
+lst@ len arr float f!
+lst@ len 'cp2 for
+jmp go2
+cp2: k! lst@ k@ get f@ swp k@ swp set ret
+go2:
+f@ 0.5 vadd vsum "%f\n" print drop
+f@ vmean "%f\n" print drop
+; vargsort / vsearchsorted / vwhere
+list 30 push 10 push 20 push s3!
+s3@ len arr int b!
+s3@ len 'cp3 for
+jmp go3
+cp3: k! s3@ k@ get b@ swp k@ swp set ret
+go3:
+b@ vargsort idx!
+idx@ 0 get "%d\n" print drop
+b@ 15 vsearchsorted "%d\n" print drop
+b@ dup b@ 1 vlt vwhere vsum "%d\n" print drop
+; sort arr
+b@ sort sb!
+sb@ 0 get "%d\n" print drop
+sb@ 2 get "%d\n" print drop

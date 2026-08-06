@@ -95,7 +95,16 @@ fn main() {
     let mut tus: Vec<Parsed> = Vec::new();
     let mut mods: Vec<String> = Vec::new();
     let mut emit_toks: Vec<Tok> = Vec::new();
-    let mut hash_src = String::from("codegen-rev: slim16-bbvtab-forinl\n");
+    // the cache key must change whenever the codegen/runtime changes, so fold
+    // in the compiler executable's own mtime (rebuild => new cache entries)
+    let mut hash_src = String::from("codegen-rev: v10-gc-fanout\n");
+    if let Ok(exe) = env::current_exe() {
+        if let Ok(md) = fs::metadata(&exe) {
+            if let Ok(mt) = md.modified() {
+                hash_src.push_str(&format!("{:?}\n", mt));
+            }
+        }
+    }
     let emitting = emit_text_f || emit_dense_f;
     let n_in = inputs.len();
     for (k, input) in inputs.iter().enumerate() {
@@ -178,7 +187,7 @@ fn main() {
     let csrc = gen(&parsed, &structs);
 
     // effective link line: pthread always (weave/chan/atom substrate), -l per USE
-    let mut links: Vec<String> = vec!["-lpthread".to_string()];
+    let mut links: Vec<String> = vec!["-lpthread".to_string(), "-lm".to_string()];
     for u in &parsed.uses {
         links.push(format!("-l{}", u));
     }

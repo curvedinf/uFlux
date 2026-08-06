@@ -188,11 +188,8 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
                             None => panic!("WEAVE: task {} has unknown input {}", n, inp),
                         }
                     }
-                    if idxs.len() > 8 {
-                        panic!("WEAVE: task {} has more than 8 inputs", n);
-                    }
-                    if *count > 1 && idxs.len() != 1 {
-                        panic!("WEAVE: fanout task {} ({} workers) must have exactly one input", n, count);
+                    if *count > 1 && idxs.is_empty() {
+                        panic!("WEAVE: fanout task {} ({} workers) must have at least one input", n, count);
                     }
                     metas.push(WeaveMeta { name: n.clone(), pc: n.clone(), inputs: idxs, count: *count });
                 }
@@ -559,6 +556,7 @@ pub fn simple_ins(name: &'static str) -> Ins {
         "SHL" => "op_shl",
         "BNOT" => "op_bnot",
         // v10: container protocol & sequences
+        "DEL" => "op_del",
         "GETQ" => "op_getq",
         "HAS" => "op_has",
         "ORELSE" => "op_orelse",

@@ -415,16 +415,14 @@ pub fn emit_range(
                 let n = tasks.len();
                 e.push_str(&format!("{{WeaveTask uf_wt[{}];\n", n));
                 for (k, t) in tasks.iter().enumerate() {
-                    let mut ins = String::new();
-                    for &j in &t.inputs {
-                        ins.push_str(&format!("{},", j));
-                    }
+                    let ins: Vec<String> = t.inputs.iter().map(|j| j.to_string()).collect();
+                    e.push_str(&format!("int uf_wi{}[]={{{}}};\n", k, ins.join(",")));
                     e.push_str(&format!(
-                        "uf_wt[{}]=(WeaveTask){{{}, {}, {{{}}}, {}, {{0,0}}, 0, 0,0,0,0,0}};\n",
+                        "uf_wt[{}]=(WeaveTask){{{}, {}, uf_wi{}, {}, {{0,0}}, 0, 0,0,0,0,0}};\n",
                         k,
                         resolve(&t.pc),
                         t.inputs.len(),
-                        ins,
+                        k,
                         t.count
                     ));
                 }
@@ -486,7 +484,7 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
     for (i, s) in p.strings.iter().enumerate() {
         let blen = s.len();
         o.push_str(&format!(
-            "static const struct {{ void* gc_next; uint64_t gc_flags; uint64_t tag; uint64_t len; uint64_t esz; uint64_t ety; char d[{}]; }} uf_sl{} = {{0,0,9,{},1,0,\"{}\"}};\n",
+            "static struct {{ void* gc_next; uint64_t gc_flags; uint64_t tag; uint64_t len; uint64_t esz; uint64_t ety; uint64_t mlen; const char* mdata; char d[{}]; }} uf_sl{} = {{0,0,9,{},1,0,0,0,\"{}\"}};\n",
             blen + 1,
             i,
             blen,
@@ -699,7 +697,7 @@ pub fn arg_cast(ct: &str, var: &str) -> String {
     match ct {
         "int64_t" => format!("(int64_t)({0}.tag==T_FLOAT?(int64_t)uf_f({0}):{0}.i)", var),
         "double" => format!("uf_f({})", var),
-        "void*" => format!("((void*){}.i)", var),
+        "void*" => format!("(void*)uf_sptr({})", var),
         "char" => format!("(char){}.i", var),
         _ => var.to_string(),
     }

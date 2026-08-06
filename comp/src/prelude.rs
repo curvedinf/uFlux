@@ -1,14 +1,20 @@
-// ---------------- C prelude ----------------
+// ---------------- C prelude (v10) ----------------
 pub const PRELUDE: &str = r#"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <math.h>
+#include <time.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <sched.h>
+#include <setjmp.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #ifdef _WIN32
 #include <process.h>
@@ -17,44 +23,206 @@ pub const PRELUDE: &str = r#"
 #include <fnmatch.h>
 #endif
 
-enum { T_INT=0, T_FLOAT=1, T_PTR=2 };
-/* Slim 16-byte cell: pointer payloads live in i (cast at use sites), float
-   payloads are the double bit pattern in i. uf_f()/uf_fromf() convert.
-   (This keeps a whole cell in two GP registers and lets cc -O2 scalarize
-   fused basic blocks.) */
+/* v10 type tags (SPEC_v10_proposal.md): 0 int, 1 float, 2 ptr, 3 byte,
+   4 void, 5 arr, 6 tensor, 7 list, 8 dict, 9 str, 10 chan, 11 atom,
+   12 buf, 13 obj, 14 bitmap, 15 time, 16 dur, 17 bloom, 18 iter */
+enum { T_INT=0, T_FLOAT=1, T_PTR=2, T_BYTE=3, T_TIME=15, T_DUR=16 };
+enum { HT_ARR=5, HT_TENSOR=6, HT_DYN=7, HT_MAP=8, HT_STR=9, HT_RING=10, HT_ATOM=11, HT_BUF=12, HT_OBJ=13, HT_BITMAP=14, HT_BLOOM=17, HT_ITER=18 };
 typedef struct { int tag; int64_t i; } Cell;
-/* handle tags (TYPEOF results): 0..4 are the scalar type ids, handles start at 5 */
-enum { HT_ARR=5, HT_TENSOR=6, HT_DYN=7, HT_MAP=8, HT_RING=9, HT_ATOM=10, HT_STR=11, HT_BUF=12, HT_OBJ=13 };
-typedef struct { uint64_t tag; uint64_t len; uint64_t esz; char data[]; } Hdr;
-/* container structs; only the {tag,len,esz} prefix is shared with Hdr, so any
-   generic access to elements must go through uf_data() */
-typedef struct { uint64_t tag; uint64_t len; uint64_t esz; uint64_t cap; Cell data[]; } Dyn;
-typedef struct { uint64_t tag; uint64_t len; uint64_t cap; Cell* keys; Cell* vals; unsigned char* st; } Map;
-typedef struct { uint64_t tag; uint64_t len; uint64_t cap; Cell* buf; uint64_t head; uint64_t tail; pthread_mutex_t mu; pthread_cond_t notfull; pthread_cond_t notempty; int closed; } Ring;
-typedef struct { uint64_t tag; uint64_t len; _Atomic int64_t v; } Atom;
+
+/* GC header prefix shared by every tagged object: gc_next links the global
+   allocation list; gc_flags holds the mark bit, pin bit, mmap bit and the
+   allocation sequence (objects younger than a collection's start are never
+   swept, which closes the alloc-then-publish race window). */
+#define UFHDR void* gc_next; uint64_t gc_flags; uint64_t tag; uint64_t len; uint64_t esz; uint64_t ety
+#define GCF_MARK 1
+#define GCF_PINNED 2
+#define GCF_MMAP 4
+#define GCF_SEQSHIFT 8
+typedef struct { UFHDR; char data[]; } Hdr;
+typedef struct { UFHDR; uint64_t cap; Cell data[]; } Dyn;
+typedef struct { UFHDR; uint64_t cap; Cell* keys; Cell* vals; unsigned char* st; } Map;
+typedef struct { UFHDR; uint64_t cap; Cell* buf; uint64_t head; uint64_t tail; pthread_mutex_t mu; pthread_cond_t notfull; pthread_cond_t notempty; int closed; } Ring;
+typedef struct { UFHDR; _Atomic int64_t v; } Atom;
+typedef struct { UFHDR; uint64_t mlen; const char* mdata; char data[]; } Str; /* mlen>0: mmap'd (mdata, munmap on sweep); else inline data[] */
+typedef struct { UFHDR; uint64_t words[]; } Bitmap; /* len = bit count, LSB-first u64 words */
+typedef struct { UFHDR; int k; uint64_t words[]; } Bloom; /* len = bit count */
+enum { IT_LIST=0, IT_ARR, IT_DICT, IT_STR, IT_CHAN, IT_BITMAP, IT_MAP, IT_FILTER };
+typedef struct { UFHDR; Cell src; int kind; int64_t idx; Cell f; Cell g; } Iter;
 static char* uf_data(Hdr*a){ return a->tag==HT_DYN ? (char*)((Dyn*)a)->data : (char*)a->data; }
 
-/* per-task execution context: each weave task runs with its own stacks */
-typedef struct { Cell* ds; long sp; long dcap; const void** cs; long csp; long ccap; } Ctx;
-static void die(const char*m){ fprintf(stderr,"uflux: %s\n",m); exit(1); }
-static Ctx* ctx_new(long dcap,long ccap){ Ctx*c=(Ctx*)malloc(sizeof(Ctx)); c->ds=(Cell*)malloc(dcap*sizeof(Cell)); c->cs=(const void**)malloc(ccap*sizeof(void*)); c->sp=0; c->csp=0; c->dcap=dcap; c->ccap=ccap; return c; }
+/* per-task execution context: each weave task / spawn runs with its own stacks.
+   loops: dynamic loop-frame stack for BREAK/CONT unwinding. */
+typedef struct { const void* end; const void* cont; long cspl; } UfLoop;
+typedef struct CtxS { Cell* ds; long sp; long dcap; const void** cs; long csp; long ccap; UfLoop loops[64]; long lsp; struct CtxS* gc_prev; } Ctx;
+
+static void uflux_run(Ctx*cx, long pc);
+static _Thread_local const void* uf_entry_addr; /* pc<0 entry convention: goto *uf_entry_addr */
+static void uf_call_addr(Ctx*cx, const void* a){ cx->cs[cx->csp++]=0; uf_entry_addr=a; uflux_run(cx,-1); }
+
+/* ---- error containment (try/retry): die unwinds to the nearest setjmp
+   checkpoint; with no checkpoint die is fatal, as before ---- */
+typedef struct UfTry { jmp_buf jb; struct UfTry* prev; long sp; } UfTry;
+static _Thread_local UfTry* uf_try_top = 0;
+static _Thread_local void* uf_cur_task; /* WeaveTask* for debug counters */
+static void die(const char*m){
+  if(uf_try_top){ UfTry*t=uf_try_top; longjmp(t->jb,1); }
+  fprintf(stderr,"uflux: %s\n",m); exit(1);
+}
+
+/* ================= garbage collector: precise, non-moving, stop-the-world
+   mark-sweep. Roots: every registered Ctx's data stack, all variables,
+   active weave results, chan contents (scanned as object bodies), and the
+   builder tmp-root stack. Untagged malloc/buf pointers are never traced. */
+static void* uf_gc_list;
+static _Atomic uint64_t uf_gc_seq = 1;
+static uint64_t uf_gc_bytes_since, uf_gc_threshold = 1<<20, uf_gc_live;
+static int uf_gc_on = 1;
+static pthread_mutex_t uf_gc_mu = PTHREAD_MUTEX_INITIALIZER;
+/* address hash set of live objects (open addressing, powers of two) */
+static void** uf_gc_set; static uint64_t uf_gc_setcap, uf_gc_setlen;
+static void uf_gc_set_insert(void* p);
+static void uf_gc_set_grow(void){
+  uint64_t oc=uf_gc_setcap; void** os=uf_gc_set;
+  uf_gc_setcap = oc? oc*2 : 1024; uf_gc_setlen = 0;
+  uf_gc_set = (void**)calloc(uf_gc_setcap, sizeof(void*)); if(!uf_gc_set)die("out of memory");
+  for(uint64_t i=0;i<oc;i++) if(os[i]) uf_gc_set_insert(os[i]);
+  free(os);
+}
+static void uf_gc_set_insert(void* p){
+  if((uf_gc_setlen+1)*10 >= uf_gc_setcap*7) uf_gc_set_grow();
+  uint64_t i = ((uint64_t)p >> 4) * 11400714819323198485ULL >> 32; i %= uf_gc_setcap;
+  while(uf_gc_set[i] && uf_gc_set[i]!=p) i=(i+1)%uf_gc_setcap;
+  if(!uf_gc_set[i]){ uf_gc_set[i]=p; uf_gc_setlen++; }
+}
+static void uf_gc_set_remove(void* p){
+  if(!uf_gc_setcap) return;
+  uint64_t i = ((uint64_t)p >> 4) * 11400714819323198485ULL >> 32; i %= uf_gc_setcap;
+  while(uf_gc_set[i]){ if(uf_gc_set[i]==p){ uf_gc_set[i]=(void*)1; uf_gc_setlen--; return; } i=(i+1)%uf_gc_setcap; }
+}
+static Hdr* uf_gc_find(void* p){
+  if(!p || !uf_gc_setcap || p==(void*)1) return 0;
+  uint64_t i = ((uint64_t)p >> 4) * 11400714819323198485ULL >> 32; i %= uf_gc_setcap;
+  while(uf_gc_set[i]){ if(uf_gc_set[i]==p) return (Hdr*)p; i=(i+1)%uf_gc_setcap; }
+  return 0;
+}
+/* context registry: every Ctx's data stack is a precise root set */
+#define UF_MAXCTX 512
+static Ctx* uf_ctxs[UF_MAXCTX]; static _Atomic int uf_nctxs;
+static void ctx_register(Ctx*c){ pthread_mutex_lock(&uf_gc_mu); int i=uf_nctxs; if(i<UF_MAXCTX){ uf_ctxs[i]=c; uf_nctxs=i+1; } pthread_mutex_unlock(&uf_gc_mu); }
+static void ctx_unregister(Ctx*c){ pthread_mutex_lock(&uf_gc_mu); for(int i=0;i<uf_nctxs;i++) if(uf_ctxs[i]==c){ uf_ctxs[i]=uf_ctxs[uf_nctxs-1]; uf_nctxs--; break; } pthread_mutex_unlock(&uf_gc_mu); }
+/* variable roots, registered by generated code */
+static Cell** uf_var_roots; static long uf_nvar_roots;
+static void uf_gc_setroots(Cell** r, long n){ uf_var_roots=r; uf_nvar_roots=n; }
+/* tmp roots for builder ops (in-progress containers while they grow) */
+#define UF_MAXTMP 1024
+static void*** uf_tmp_roots = 0; static _Atomic int uf_ntmp;
+#define UF_PROTECT(pp) do{ int _i=atomic_fetch_add(&uf_ntmp,1); if(_i<UF_MAXTMP)uf_tmp_roots[_i]=(void**)(pp); }while(0)
+#define UF_UNPROTECT() atomic_fetch_sub(&uf_ntmp,1)
+static void uf_mark_cell(Cell c);
+static void uf_mark_obj(Hdr* h);
+static void uf_mark_ptr(void* p){
+  Hdr* h = uf_gc_find(p);
+  if(h) uf_mark_obj(h);
+}
+static void uf_mark_cell(Cell c){ if(c.tag==T_PTR && c.i) uf_mark_ptr((void*)c.i); }
+static void uf_mark_obj(Hdr* h){
+  if(h->gc_flags & GCF_MARK) return;
+  h->gc_flags |= GCF_MARK;
+  switch(h->tag){
+    case HT_DYN: { Dyn* d=(Dyn*)h; for(uint64_t i=0;i<d->len;i++) uf_mark_cell(d->data[i]); break; }
+    case HT_MAP: { Map* m=(Map*)h; for(uint64_t i=0;i<m->cap;i++) if(m->st[i]==1){ uf_mark_cell(m->keys[i]); uf_mark_cell(m->vals[i]); } break; }
+    case HT_RING: { Ring* r=(Ring*)h; for(uint64_t j=0;j<r->len;j++) uf_mark_cell(r->buf[(r->head+j)%r->cap]); break; }
+    case HT_OBJ: { uint64_t n=h->esz/8; Cell* f=(Cell*)h->data; for(uint64_t i=0;i<n;i++) uf_mark_cell(f[i]); break; }
+    case HT_ITER: { Iter* it=(Iter*)h; uf_mark_cell(it->src); uf_mark_cell(it->f); uf_mark_cell(it->g); break; }
+    default: break; /* arr/tensor/str/bitmap/bloom/atom/buf: leaf bytes */
+  }
+}
+struct WeaveJobS; static struct WeaveJobS* uf_active_job;
+static void uf_weave_mark(struct WeaveJobS* j);
+static Ctx main_cx_store; /* defined below */
+static void uf_gc_free_obj(Hdr* h){
+  switch(h->tag){
+    case HT_MAP: { Map* m=(Map*)h; free(m->keys); free(m->vals); free(m->st); break; }
+    case HT_RING: { Ring* r=(Ring*)h; pthread_mutex_destroy(&r->mu); pthread_cond_destroy(&r->notfull); pthread_cond_destroy(&r->notempty); free(r->buf); break; }
+    case HT_STR: { Str* s=(Str*)h; if(s->mlen) munmap((void*)s->mdata,(size_t)s->mlen); break; }
+    default: break;
+  }
+  free(h);
+}
+static void uf_gc_collect(void){
+  pthread_mutex_lock(&uf_gc_mu);
+  uint64_t start_seq = uf_gc_seq;
+  /* mark: variables, every registered Ctx stack, tmp builder roots, weave results */
+  for(long i=0;i<uf_nvar_roots;i++) uf_mark_cell(*uf_var_roots[i]);
+  int nc = uf_nctxs;
+  for(int i=0;i<nc;i++){ Ctx* c=uf_ctxs[i]; for(long s=0;s<c->sp;s++) uf_mark_cell(c->ds[s]); }
+  int nt = uf_ntmp; if(nt>UF_MAXTMP)nt=UF_MAXTMP;
+  for(int i=0;i<nt;i++){ void** pp=uf_tmp_roots[i]; if(pp&&*pp) uf_mark_ptr(*pp); }
+  if(uf_active_job) uf_weave_mark(uf_active_job);
+  /* sweep: free unmarked, unpinned objects older than this collection */
+  void** pp = &uf_gc_list; uint64_t live=0;
+  while(*pp){
+    Hdr* h=(Hdr*)*pp;
+    if(!(h->gc_flags&GCF_MARK) && !(h->gc_flags&GCF_PINNED) && ((h->gc_flags>>GCF_SEQSHIFT) < start_seq)){
+      *pp = h->gc_next; uf_gc_set_remove((void*)h); uf_gc_free_obj(h);
+    } else {
+      h->gc_flags &= ~(uint64_t)GCF_MARK; pp = &h->gc_next;
+    }
+  }
+  for(uint64_t i=0;i<uf_gc_setcap;i++) if(uf_gc_set[i]&&uf_gc_set[i]!=(void*)1) live++;
+  uf_gc_live = live; uf_gc_bytes_since = 0;
+  uint64_t t2 = uf_gc_live*256; /* ~2x live bytes, objects ~128B avg */
+  uf_gc_threshold = (1<<20) > t2 ? (1<<20) : t2;
+  pthread_mutex_unlock(&uf_gc_mu);
+}
+static void* uf_gc_alloc(size_t sz, int align){
+  if(uf_gc_on && uf_gc_bytes_since + sz > uf_gc_threshold) uf_gc_collect();
+  void* p = NULL;
+  if(align>0){ if(posix_memalign(&p,(size_t)align,sz?sz:1))die("alloc failed"); }
+  else { p=malloc(sz?sz:1); }
+  if(!p)die("out of memory");
+  memset(p,0,sz?sz:1);
+  pthread_mutex_lock(&uf_gc_mu);
+  Hdr* h=(Hdr*)p; h->gc_next=uf_gc_list; uf_gc_list=p;
+  h->gc_flags = ((uint64_t)atomic_fetch_add(&uf_gc_seq,1))<<GCF_SEQSHIFT;
+  uf_gc_bytes_since += sz;
+  uf_gc_set_insert(p);
+  pthread_mutex_unlock(&uf_gc_mu);
+  return p;
+}
+/* register a static object (string literal): linked, pinned, never swept */
+static void uf_gc_register_static(void* p){
+  pthread_mutex_lock(&uf_gc_mu);
+  Hdr* h=(Hdr*)p; h->gc_next=uf_gc_list; uf_gc_list=p;
+  h->gc_flags = GCF_PINNED;
+  uf_gc_set_insert(p);
+  pthread_mutex_unlock(&uf_gc_mu);
+}
+static void uf_init_lits(void** lits, long n){ for(long i=0;i<n;i++) uf_gc_register_static(lits[i]); }
+static void uf_gc_init(void){
+  const char* e=getenv("UF_GC_THRESHOLD");
+  if(e&&*e){ uint64_t v=strtoull(e,0,0); if(v) uf_gc_threshold=v; }
+  uf_tmp_roots=(void***)calloc(UF_MAXTMP,sizeof(void**));
+  ctx_register(&main_cx_store);
+}
+static void op_gc(Ctx*cx){ (void)cx; uf_gc_collect(); }
+
+static Ctx* ctx_new(long dcap,long ccap){ Ctx*c=(Ctx*)calloc(1,sizeof(Ctx)); if(!c)die("out of memory"); c->ds=(Cell*)malloc(dcap*sizeof(Cell)); c->cs=(const void**)malloc(ccap*sizeof(void*)); if(!c->ds||!c->cs)die("out of memory"); c->dcap=dcap; c->ccap=ccap; ctx_register(c); return c; }
+static void ctx_free(Ctx*c){ ctx_unregister(c); free(c->ds); free((void*)c->cs); free(c); }
 static Cell main_ds[1<<20]; static const void* main_cs[1<<16];
-static Ctx main_cx_store = { main_ds, 0, 1<<20, main_cs, 0, 1<<16 };
+static Ctx main_cx_store = { main_ds, 0, 1<<20, main_cs, 0, 1<<16, {{0,0,0}}, 0, 0 };
 static Ctx* main_cx = &main_cx_store;
-int64_t uf_argc=0; void* uf_argv=0; /* program args, reachable via EXTERN "uf_argc"/"uf_argv" + LOADX */
+int64_t uf_argc=0; void* uf_argv=0; /* program args, reachable via EXTERN "uf_argc"/"uf_argv" + LOADX, or ARGV */
 
 static void pushc(Ctx*cx,Cell c){ if(cx->sp>=cx->dcap)die("stack overflow"); cx->ds[cx->sp++]=c; }
-/* pure Cell constructors/arith: shared by the op helpers and by the fused
-   basic-block codegen (which keeps values in C locals instead of the ds) */
 static inline Cell uf_mki(int64_t v){ Cell c; c.tag=T_INT; c.i=v; return c; }
 static inline Cell uf_mkp(void* v){ Cell c; c.tag=T_PTR; c.i=(int64_t)v; return c; }
 static inline double uf_fbits(int64_t i){ union{int64_t i;double f;}u;u.i=i;return u.f; }
 static inline int64_t uf_ibits(double f){ union{int64_t i;double f;}u;u.f=f;return u.i; }
-/* numeric value of a cell as a double (tag-aware, for mixed int/float arith) */
 static inline double uf_f(Cell c){ return c.tag==T_FLOAT?uf_fbits(c.i):(double)c.i; }
 static inline Cell uf_mkf(double v){ Cell c; c.tag=T_FLOAT; c.i=uf_ibits(v); return c; }
 static inline Cell uf_fromf(double v){ return uf_mkf(v); }
-/* truthiness as JZ historically defined it: (int64_t)value == 0 */
 static inline int uf_zero(Cell c){ return c.tag==T_FLOAT?(int64_t)uf_fbits(c.i)==0:c.i==0; }
 static inline Cell uf_cadd(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT)return uf_fromf(uf_f(a)+uf_f(b)); return uf_mki(a.i+b.i); }
 static inline Cell uf_csub(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT)return uf_fromf(uf_f(a)-uf_f(b)); return uf_mki(a.i-b.i); }
@@ -64,8 +232,24 @@ static inline Cell uf_cshr(Cell a){ return uf_mki((int64_t)((uint64_t)a.i>>1)); 
 static inline Cell uf_cinc(Cell a){ if(a.tag==T_FLOAT)return uf_fromf(uf_f(a)+1.0); return uf_mki(a.i+1); }
 static inline Cell uf_cdec(Cell a){ if(a.tag==T_FLOAT)return uf_fromf(uf_f(a)-1.0); return uf_mki(a.i-1); }
 static inline int uf_ceq(Cell a,Cell b){ return (a.tag==T_FLOAT||b.tag==T_FLOAT)?uf_f(a)==uf_f(b):a.i==b.i; }
-static inline Cell uf_cidx(Cell h,int64_t ix){ Hdr*a=(Hdr*)h.i; if(ix<0||(uint64_t)ix>=a->len)die("IDX out of bounds"); char*dt=uf_data(a); if(a->esz==8)return uf_mki(((int64_t*)dt)[ix]); if(a->esz==sizeof(Cell))return ((Cell*)dt)[ix]; return uf_mki((int64_t)((uint8_t*)dt)[ix]); }
-static inline void uf_cseti(Cell h,int64_t ix,Cell v){ Hdr*a=(Hdr*)h.i; if(ix<0||(uint64_t)ix>=a->len)die("SETI out of bounds"); char*dt=uf_data(a); if(a->esz==8)((int64_t*)dt)[ix]=v.i; else if(a->esz==sizeof(Cell))((Cell*)dt)[ix]=v; else ((uint8_t*)dt)[ix]=(uint8_t)v.i; }
+
+/* ---- string access: every core string is a tag-9 Str object; raw char*
+   from IMPORTed C functions is still accepted (legacy ptr) ---- */
+static int uf_is_str(Cell c){ if(c.tag!=T_PTR||!c.i)return 0; Hdr*h=uf_gc_find((void*)c.i); return h&&h->tag==HT_STR; }
+static const char* uf_sbytes(Str*s){ return s->mlen?s->mdata:s->data; }
+static const char* uf_sptr(Cell c){ if(c.tag==T_PTR&&c.i){ Hdr*h=uf_gc_find((void*)c.i); if(h&&h->tag==HT_STR){ Str*s=(Str*)h; return s->mlen?s->mdata:s->data; } if(h&&h->tag==HT_BUF){ return h->data; } } return (const char*)c.i; }
+static int64_t uf_slen(Cell c){ if(c.tag==T_PTR&&c.i){ Hdr*h=uf_gc_find((void*)c.i); if(h&&h->tag==HT_STR)return (int64_t)h->len; } return (int64_t)strlen((const char*)c.i); }
+static Cell uf_str_new(const char* s, size_t n){
+  Str* r=(Str*)uf_gc_alloc(sizeof(Str)+n+1,0);
+  r->tag=HT_STR; r->len=n; r->esz=1; r->mlen=0;
+  memcpy(r->data,s,n); r->data[n]=0;
+  return uf_mkp(r);
+}
+static Cell uf_str_dup(Cell c){ const char* s=uf_sptr(c); return uf_str_new(s,strlen(s)); }
+
+/* arr element access honors the element type (ety): 0 int (8B), 1 float (8B), 3 byte (1B) */
+static inline Cell uf_cidx(Cell h,int64_t ix){ Hdr*a=(Hdr*)h.i; if(ix<0||(uint64_t)ix>=a->len)die("index out of bounds"); char*dt=uf_data(a); if(a->tag==HT_DYN)return ((Cell*)dt)[ix]; if(a->ety==3)return uf_mki((int64_t)((uint8_t*)dt)[ix]); if(a->ety==1)return uf_mkf(((double*)dt)[ix]); return uf_mki(((int64_t*)dt)[ix]); }
+static inline void uf_cseti(Cell h,int64_t ix,Cell v){ Hdr*a=(Hdr*)h.i; if(ix<0||(uint64_t)ix>=a->len)die("index out of bounds"); char*dt=uf_data(a); if(a->tag==HT_DYN){((Cell*)dt)[ix]=v;return;} if(a->ety==3){((uint8_t*)dt)[ix]=(uint8_t)v.i;return;} if(a->ety==1){((double*)dt)[ix]=uf_f(v);return;} ((int64_t*)dt)[ix]=v.i; }
 static void pushi(Ctx*cx,int64_t v){ pushc(cx,uf_mki(v)); }
 static void pushf(Ctx*cx,double v){ pushc(cx,uf_mkf(v)); }
 static void pushp(Ctx*cx,void* v){ pushc(cx,uf_mkp(v)); }
@@ -86,24 +270,257 @@ static void op_shr(Ctx*cx){ pushc(cx,uf_cshr(pop(cx))); }
 static void op_inc(Ctx*cx){ pushc(cx,uf_cinc(pop(cx))); }
 static void op_dec(Ctx*cx){ pushc(cx,uf_cdec(pop(cx))); }
 
+/* v10 arithmetic & logic */
+static void op_div(Ctx*cx){ Cell b=pop(cx),a=pop(cx); if(a.tag==T_FLOAT||b.tag==T_FLOAT){ double d=uf_f(b); if(d==0.0)die("DIV: division by zero"); pushf(cx,uf_f(a)/d); } else { if(b.i==0)die("DIV: division by zero"); pushi(cx,a.i/b.i); } }
+static void op_rem(Ctx*cx){ Cell b=pop(cx),a=pop(cx); if(a.tag==T_FLOAT||b.tag==T_FLOAT){ double d=uf_f(b); if(d==0.0)die("REM: division by zero"); pushf(cx,fmod(uf_f(a),d)); } else { if(b.i==0)die("REM: division by zero"); pushi(cx,a.i%b.i); } }
+static void op_eq(Ctx*cx){
+  Cell b=pop(cx),a=pop(cx); int r;
+  if(a.tag==T_FLOAT||b.tag==T_FLOAT){ if((a.tag==T_INT||a.tag==T_FLOAT)&&(b.tag==T_INT||b.tag==T_FLOAT)) r=(uf_f(a)==uf_f(b)); else r=(a.i==b.i&&a.tag==b.tag); }
+  else if(uf_is_str(a)&&uf_is_str(b)) r=strcmp(uf_sptr(a),uf_sptr(b))==0;
+  else if((a.tag==T_PTR&&a.i&&uf_gc_find((void*)a.i))||(b.tag==T_PTR&&b.i&&uf_gc_find((void*)b.i))) r=(a.i==b.i);
+  else r=(a.i==b.i);
+  pushi(cx,r?1:0);
+}
+static int uf_cmp(Cell a,Cell b,int* ok){ /* -1/0/1; *ok=0 if incomparable */
+  *ok=1;
+  if((a.tag==T_INT||a.tag==T_FLOAT||a.tag==T_TIME||a.tag==T_DUR)&&(b.tag==T_INT||b.tag==T_FLOAT||b.tag==T_TIME||b.tag==T_DUR)){
+    double x=uf_f(a),y=uf_f(b); return x<y?-1:x>y?1:0;
+  }
+  if(uf_is_str(a)&&uf_is_str(b)) return strcmp(uf_sptr(a),uf_sptr(b));
+  *ok=0; return 0;
+}
+static void op_lt(Ctx*cx){ Cell b=pop(cx),a=pop(cx); int ok; int c=uf_cmp(a,b,&ok); if(!ok)die("LT: incomparable operands"); pushi(cx,c<0?1:0); }
+static void op_gt(Ctx*cx){ Cell b=pop(cx),a=pop(cx); int ok; int c=uf_cmp(a,b,&ok); if(!ok)die("GT: incomparable operands"); pushi(cx,c>0?1:0); }
+static void op_not(Ctx*cx){ Cell a=pop(cx); pushi(cx,uf_zero(a)?1:0); }
+static void op_or(Ctx*cx){ Cell b=pop(cx),a=pop(cx); if(a.tag==T_FLOAT||b.tag==T_FLOAT||a.tag==T_PTR||b.tag==T_PTR)die("OR: ints only"); pushi(cx,a.i|b.i); }
+static void op_xor(Ctx*cx){ Cell b=pop(cx),a=pop(cx); if(a.tag==T_FLOAT||b.tag==T_FLOAT||a.tag==T_PTR||b.tag==T_PTR)die("XOR: ints only"); pushi(cx,a.i^b.i); }
+static void op_shl(Ctx*cx){ Cell b=pop(cx),a=pop(cx); if(a.tag==T_FLOAT||b.tag==T_FLOAT||a.tag==T_PTR||b.tag==T_PTR)die("SHL: ints only"); if(b.i<0||b.i>=64)die("SHL: shift out of range"); pushi(cx,a.i<<b.i); }
+static void op_bnot(Ctx*cx){ Cell a=pop(cx); if(a.tag==T_FLOAT||a.tag==T_PTR)die("BNOT: ints only"); pushi(cx,~a.i); }
+static void op_orelse(Ctx*cx){ Cell b=pop(cx),a=pop(cx); pushc(cx,uf_zero(a)?b:a); }
+
 static void* uf_alloc(size_t sz,int align){ void*p=NULL; if(align>0){ if(posix_memalign(&p,(size_t)align,sz?sz:1))die("alloc failed"); } else { p=malloc(sz?sz:1); } if(!p)die("out of memory"); return p; }
-static void op_arrn(Ctx*cx,uint64_t tag,int align){ int64_t len=pop(cx).i, ty=pop(cx).i; int64_t esz=(ty==3)?1:8; if(len<0)die("negative length"); Hdr*h=(Hdr*)uf_alloc(sizeof(Hdr)+(size_t)len*(size_t)esz,align); h->tag=tag; h->len=(uint64_t)len; h->esz=(uint64_t)esz; memset(h->data,0,(size_t)len*(size_t)esz); pushp(cx,h); }
+static void op_arrn(Ctx*cx,uint64_t tag,int align){ int64_t len=pop(cx).i, ty=pop(cx).i; int64_t esz=(ty==3)?1:8; if(len<0)die("negative length"); Hdr*h=(Hdr*)uf_gc_alloc(sizeof(Hdr)+(size_t)len*(size_t)esz,align); h->tag=tag; h->len=(uint64_t)len; h->esz=(uint64_t)esz; h->ety=(uint64_t)ty; memset(h->data,0,(size_t)len*(size_t)esz); pushp(cx,h); }
 static void op_arr(Ctx*cx){ op_arrn(cx,HT_ARR,0); }
 static void op_tensor(Ctx*cx){ op_arrn(cx,HT_TENSOR,64); }
-static void op_idx(Ctx*cx){ int64_t ix=pop(cx).i; Cell h=pop(cx); pushc(cx,uf_cidx(h,ix)); }
-static void op_seti(Ctx*cx){ Cell v=pop(cx); int64_t ix=pop(cx).i; Cell h=pop(cx); uf_cseti(h,ix,v); }
-static void op_clone(Ctx*cx){ Cell h=pop(cx); Hdr*a=(Hdr*)((void*)h.i); size_t sz=sizeof(Hdr)+(size_t)a->len*a->esz; void*n=uf_alloc(sz,0); memcpy(n,a,sz); memcpy(uf_data((Hdr*)n),uf_data(a),(size_t)a->len*a->esz); pushp(cx,n); }
+static void op_clone(Ctx*cx){
+  Cell h=pop(cx); Hdr*a=(Hdr*)uf_gc_find((void*)h.i);
+  if(!a)die("CLONE: not a managed object");
+  if(a->tag==HT_ITER)die("CLONE: iterators are single-use");
+  if(a->tag!=HT_ARR&&a->tag!=HT_TENSOR)die("CLONE: only arr/tensor");
+  size_t sz=sizeof(Hdr)+(size_t)a->len*a->esz; Hdr*n=(Hdr*)uf_gc_alloc(sz,a->tag==HT_TENSOR?64:0);
+  memcpy(n,a,sz); n->gc_next=0; n->gc_flags=((uint64_t)atomic_fetch_add(&uf_gc_seq,1))<<GCF_SEQSHIFT;
+  pushp(cx,n);
+}
 static void op_cast(Ctx*cx){ Cell id=pop(cx); Cell h=pop(cx); Hdr*a=(Hdr*)((void*)h.i); int64_t tk=(a->tag==HT_OBJ)?1000+(int64_t)a->len:(int64_t)a->tag; if(tk!=id.i)die("CAST: type mismatch"); pushc(cx,h); }
 
-/* OBJ: size in low 32 bits of the operand, struct id above; the object carries
-   a Hdr (tag HT_OBJ, len=struct id) so TYPEOF/FIELDS/SEND/CAST can see it.
-   GET/SET offsets are relative to the object data (after the header). */
-static void op_obj(Ctx*cx){ int64_t v=pop(cx).i; int64_t sz=v&0xffffffffLL; int64_t sid=v>>32; if(sz<=0)sz=8; Hdr*h=(Hdr*)uf_alloc(sizeof(Hdr)+(size_t)sz,0); h->tag=HT_OBJ; h->len=(uint64_t)sid; h->esz=8; memset(h->data,0,(size_t)sz); pushp(cx,h); }
-static void op_get(Ctx*cx){ int64_t o=pop(cx).i; Cell h=pop(cx); Hdr*a=(Hdr*)((void*)h.i); pushi(cx,*(int64_t*)(a->data+o)); }
-/* SET: handle offset value ->  (same convention as SETI; GET: handle offset -> v) */
-static void op_set(Ctx*cx){ Cell v=pop(cx); int64_t o=pop(cx).i; Cell h=pop(cx); Hdr*a=(Hdr*)((void*)h.i); *(int64_t*)(a->data+o)=v.i; }
+/* OBJ: size in low 32 bits of the operand, struct id above; esz = byte size,
+   len = struct id. Field access via the container protocol. */
+static void op_obj(Ctx*cx){ int64_t v=pop(cx).i; int64_t sz=v&0xffffffffLL; int64_t sid=v>>32; if(sz<=0)sz=8; Hdr*h=(Hdr*)uf_gc_alloc(sizeof(Hdr)+(size_t)sz,0); h->tag=HT_OBJ; h->len=(uint64_t)sid; h->esz=(uint64_t)sz; memset(h->data,0,(size_t)sz); pushp(cx,h); }
 
-static void op_buf(Ctx*cx){ int64_t sz=pop(cx).i; if(sz<0)die("negative BUF size"); void*p=uf_alloc((size_t)sz,0); memset(p,0,(size_t)sz); pushp(cx,p); }
+/* reflection tables, populated by generated uf_init_reflection() */
+static long uf_st_n=0; static const int64_t* uf_st_sids=0; static const int64_t* uf_st_nf=0; static const char*** uf_st_fields=0; static const int64_t** uf_st_offs=0;
+/* obj field offset by key: int -> raw offset; str -> field name. -1 = missing */
+static int64_t uf_obj_off(Hdr* a, Cell k){
+  if(k.tag==T_INT) return k.i;
+  if(uf_is_str(k)){
+    int64_t sid=(int64_t)a->len;
+    for(long q=0;q<uf_st_n;q++) if(uf_st_sids[q]==sid){
+      for(int64_t f=0;f<uf_st_nf[q];f++) if(strcmp(uf_sptr(k),uf_st_fields[q][f])==0) return uf_st_offs[q][f];
+      return -1;
+    }
+  }
+  return -1;
+}
+
+/* ================= uniform container protocol ================= */
+static uint64_t uf_fnv(const void*p,size_t n){ const unsigned char*s=(const unsigned char*)p; uint64_t h=1469598103934665603ULL; for(size_t i=0;i<n;i++){ h^=s[i]; h*=1099511628211ULL; } return h; }
+static uint64_t map_hash(Cell k){
+  if(k.tag==T_PTR&&k.i){ Hdr*h=uf_gc_find((void*)k.i); if(h){ if(h->tag==HT_STR)return uf_fnv(uf_sbytes((Str*)h),h->len); return uf_fnv(&k.i,8); } return uf_fnv((void*)k.i,strlen((char*)k.i)); }
+  return uf_fnv(&k.i,8);
+}
+static int map_keyeq(Cell a,Cell b){
+  if(a.tag==T_PTR&&b.tag==T_PTR&&a.i&&b.i){
+    Hdr*ha=uf_gc_find((void*)a.i); Hdr*hb=uf_gc_find((void*)b.i);
+    if(ha&&hb){ if(ha->tag==HT_STR&&hb->tag==HT_STR){ if(ha->len!=hb->len)return 0; return memcmp(uf_sbytes((Str*)ha),uf_sbytes((Str*)hb),ha->len)==0; } return a.i==b.i; }
+    if((ha&&ha->tag==HT_STR)||(hb&&hb->tag==HT_STR)) return strcmp(uf_sptr(a),uf_sptr(b))==0;
+    return strcmp((char*)a.i,(char*)b.i)==0;
+  }
+  return a.i==b.i;
+}
+static void map_put_raw(Map*m,Cell k,Cell v){
+  uint64_t i=map_hash(k)%m->cap;
+  for(;;){ if(m->st[i]!=1){ m->st[i]=1; m->keys[i]=k; m->vals[i]=v; m->len++; return; } if(map_keyeq(m->keys[i],k)){ m->vals[i]=v; return; } i=(i+1)%m->cap; }
+}
+static void map_grow(Map*m){
+  uint64_t ncap=m->cap*2; Cell*ok=m->keys,*ov=m->vals; unsigned char*os=m->st; uint64_t ocap=m->cap;
+  m->cap=ncap; m->keys=(Cell*)uf_alloc(ncap*sizeof(Cell),0); m->vals=(Cell*)uf_alloc(ncap*sizeof(Cell),0); m->st=(unsigned char*)calloc(ncap,1); m->len=0;
+  for(uint64_t i=0;i<ocap;i++) if(os[i]==1) map_put_raw(m,ok[i],ov[i]);
+  free(ok); free(ov); free(os);
+}
+static Map* uf_map_new(void){ Map*m=(Map*)uf_gc_alloc(sizeof(Map),0); m->tag=HT_MAP; m->len=0; m->cap=16; m->keys=(Cell*)uf_alloc(16*sizeof(Cell),0); m->vals=(Cell*)uf_alloc(16*sizeof(Cell),0); m->st=(unsigned char*)calloc(16,1); return m; }
+static void map_put(Map*m,Cell k,Cell v){ if((m->len+1)*10>=m->cap*7) map_grow(m); map_put_raw(m,k,v); }
+static int map_get(Map*m,Cell k,Cell*out){
+  if(m->cap==0)return 0;
+  uint64_t i=map_hash(k)%m->cap;
+  for(;;){ if(m->st[i]==0)return 0; if(m->st[i]==1&&map_keyeq(m->keys[i],k)){ *out=m->vals[i]; return 1; } i=(i+1)%m->cap; }
+}
+static void map_del(Map*m,Cell k){
+  if(m->cap==0)return;
+  uint64_t i=map_hash(k)%m->cap;
+  for(;;){ if(m->st[i]==0)return; if(m->st[i]==1&&map_keyeq(m->keys[i],k)){ m->st[i]=2; m->len--; return; } i=(i+1)%m->cap; }
+}
+static Dyn* uf_dyn_new(uint64_t cap){ if(!cap)cap=1; Dyn*d=(Dyn*)uf_gc_alloc(sizeof(Dyn)+cap*sizeof(Cell),0); d->tag=HT_DYN; d->len=0; d->esz=sizeof(Cell); d->cap=cap; return d; }
+/* grow-with-move: returns the (possibly new) list; old handle is reclaimed by GC */
+static Dyn* uf_dyn_push2(Dyn*d,Cell c){ if(d->len>=d->cap){ Dyn*n=uf_dyn_new(d->cap*2); memcpy(n->data,d->data,d->len*sizeof(Cell)); n->len=d->len; d=n; } d->data[d->len++]=c; return d; }
+static void uf_dyn_push(Dyn**pd,Cell c){ *pd=uf_dyn_push2(*pd,c); }
+static void uf_dyn_push_str(Dyn**pd,const char*s,size_t n){ Cell c=uf_str_new(s,n); uf_dyn_push(pd,c); }
+
+static Hdr* uf_handle(Cell h,const char* op){ if(h.tag!=T_PTR||!h.i)die("handle is null"); Hdr*a=uf_gc_find((void*)h.i); if(!a)die("not a managed handle"); (void)op; return a; }
+/* GET: h k -> v */
+static void op_get(Ctx*cx){
+  Cell k=pop(cx),h=pop(cx); Hdr*a=uf_handle(h,"GET");
+  switch(a->tag){
+    case HT_MAP: { Map*m=(Map*)a; Cell v; if(!map_get(m,k,&v))die("GET: missing key"); pushc(cx,v); return; }
+    case HT_DYN: case HT_ARR: case HT_TENSOR: pushc(cx,uf_cidx(h,k.i)); return;
+    case HT_STR: { Str*s=(Str*)a; if(k.i<0||k.i>=(int64_t)s->len)die("GET: index out of bounds"); pushi(cx,(uint8_t)uf_sbytes(s)[k.i]); return; }
+    case HT_OBJ: { int64_t o=uf_obj_off(a,k); if(o<0||(uint64_t)o>=a->esz)die("GET: no such field"); pushc(cx,*(Cell*)(a->data+o)); return; }
+    default: die("GET: unsupported handle");
+  }
+}
+/* GETQ: h k -> v_or_0 (never dies on absence; null handle -> 0) */
+static void op_getq(Ctx*cx){
+  Cell k=pop(cx),h=pop(cx);
+  if(h.tag!=T_PTR||!h.i){ pushi(cx,0); return; }
+  Hdr*a=uf_gc_find((void*)h.i); if(!a)die("GETQ: not a managed handle");
+  switch(a->tag){
+    case HT_MAP: { Map*m=(Map*)a; Cell v; if(map_get(m,k,&v))pushc(cx,v); else pushi(cx,0); return; }
+    case HT_DYN: case HT_ARR: case HT_TENSOR: if(k.i<0||(uint64_t)k.i>=a->len)pushi(cx,0); else pushc(cx,uf_cidx(h,k.i)); return;
+    case HT_STR: { Str*s=(Str*)a; if(k.i<0||k.i>=(int64_t)s->len)pushi(cx,0); else pushi(cx,(uint8_t)uf_sbytes(s)[k.i]); return; }
+    case HT_OBJ: { int64_t o=uf_obj_off(a,k); if(o<0||(uint64_t)o>=a->esz)pushi(cx,0); else pushc(cx,*(Cell*)(a->data+o)); return; }
+    default: die("GETQ: unsupported handle");
+  }
+}
+/* SET: h k v -> */
+static void op_set(Ctx*cx){
+  Cell v=pop(cx),k=pop(cx),h=pop(cx); Hdr*a=uf_handle(h,"SET");
+  switch(a->tag){
+    case HT_MAP: map_put((Map*)a,k,v); return;
+    case HT_DYN: case HT_ARR: case HT_TENSOR: uf_cseti(h,k.i,v); return;
+    case HT_STR: { Str*s=(Str*)a; if(s->mlen)die("SET: mmap string is read-only"); if(k.i<0||k.i>=(int64_t)s->len)die("SET: index out of bounds"); s->data[k.i]=(char)v.i; return; }
+    case HT_OBJ: { int64_t o=uf_obj_off(a,k); if(o<0||(uint64_t)o>=a->esz)die("SET: no such field"); *(Cell*)(a->data+o)=v; return; }
+    default: die("SET: unsupported handle");
+  }
+}
+/* DEL: h k -> (dict only) */
+static void op_del(Ctx*cx){
+  Cell k=pop(cx),h=pop(cx); Hdr*a=uf_handle(h,"DEL");
+  if(a->tag!=HT_MAP)die("DEL: only dict supports del");
+  map_del((Map*)a,k);
+}
+/* HAS: h k -> 0/1 (null handle -> 0) */
+static void op_has(Ctx*cx){
+  Cell k=pop(cx),h=pop(cx);
+  if(h.tag!=T_PTR||!h.i){ pushi(cx,0); return; }
+  Hdr*a=uf_gc_find((void*)h.i); if(!a)die("HAS: not a managed handle");
+  switch(a->tag){
+    case HT_MAP: { Cell v; pushi(cx,map_get((Map*)a,k,&v)?1:0); return; }
+    case HT_DYN: case HT_ARR: case HT_TENSOR: pushi(cx,(k.i>=0&&(uint64_t)k.i<a->len)?1:0); return;
+    case HT_STR: { const char* s=uf_sptr(h); const char* n=uf_sptr(k); pushi(cx,(*n==0||strstr(s,n))?1:0); return; }
+    case HT_OBJ: { int64_t o=uf_obj_off(a,k); pushi(cx,(o>=0&&(uint64_t)o<a->esz)?1:0); return; }
+    default: die("HAS: unsupported handle");
+  }
+}
+/* KEYS: h -> list (dict keys / obj field names) */
+static void op_keys(Ctx*cx){
+  Cell h=pop(cx); Hdr*a=uf_handle(h,"KEYS");
+  if(a->tag==HT_MAP){
+    Map*m=(Map*)a; Dyn*d=uf_dyn_new(m->len?m->len:1); UF_PROTECT(&d);
+    for(uint64_t i=0;i<m->cap;i++) if(m->st[i]==1) uf_dyn_push(&d,m->keys[i]);
+    UF_UNPROTECT(); pushp(cx,d); return;
+  }
+  if(a->tag==HT_OBJ){
+    int64_t sid=(int64_t)a->len; Dyn*d=0;
+    for(long q=0;q<uf_st_n;q++) if(uf_st_sids[q]==sid){
+      d=uf_dyn_new((uint64_t)uf_st_nf[q]); UF_PROTECT(&d);
+      for(int64_t f=0;f<uf_st_nf[q];f++){ Cell c=uf_str_new(uf_st_fields[q][f],strlen(uf_st_fields[q][f])); uf_dyn_push(&d,c); }
+      UF_UNPROTECT(); pushp(cx,d); return;
+    }
+    die("KEYS: unknown struct id");
+  }
+  die("KEYS: unsupported handle");
+}
+/* TYPEOF: h -> tag (v10 numbering) */
+static void op_typeof(Ctx*cx){
+  Cell h=pop(cx);
+  if(h.tag==T_PTR){ if(!h.i){pushi(cx,2);return;} Hdr*a=uf_gc_find((void*)h.i); pushi(cx,a?(int64_t)a->tag:2); return; }
+  pushi(cx,(int64_t)h.tag);
+}
+/* LEN: h -> n */
+static void op_len(Ctx*cx){
+  Cell h=pop(cx); Hdr*a=uf_handle(h,"LEN");
+  switch(a->tag){
+    case HT_ARR: case HT_TENSOR: case HT_DYN: case HT_MAP: case HT_RING: pushi(cx,(int64_t)a->len); return;
+    case HT_STR: pushi(cx,(int64_t)a->len); return;
+    case HT_BITMAP: pushi(cx,(int64_t)a->len); return;
+    case HT_ATOM: pushi(cx,1); return;
+    case HT_BLOOM: pushi(cx,(int64_t)a->len); return;
+    default: die("LEN: handle has no length");
+  }
+}
+/* CAT: a b -> h' (str concat / arr concat / list concat) */
+static void op_cat(Ctx*cx){
+  Cell b=pop(cx),a=pop(cx);
+  Hdr*ha=a.tag==T_PTR&&a.i?uf_gc_find((void*)a.i):0;
+  Hdr*hb=b.tag==T_PTR&&b.i?uf_gc_find((void*)b.i):0;
+  uint64_t ta=ha?ha->tag:0, tb=hb?hb->tag:0;
+  if(ta==HT_DYN||tb==HT_DYN){
+    if(ta!=HT_DYN||tb!=HT_DYN)die("CAT: list/str mismatch");
+    Dyn*x=(Dyn*)ha,*y=(Dyn*)hb; Dyn*r=uf_dyn_new(x->len+y->len); UF_PROTECT(&r);
+    for(uint64_t i=0;i<x->len;i++)uf_dyn_push(&r,x->data[i]);
+    for(uint64_t i=0;i<y->len;i++)uf_dyn_push(&r,y->data[i]);
+    UF_UNPROTECT(); pushp(cx,r); return;
+  }
+  if((ta==HT_ARR||ta==HT_TENSOR)||(tb==HT_ARR||tb==HT_TENSOR)){
+    if((ta!=HT_ARR&&ta!=HT_TENSOR)||(tb!=HT_ARR&&tb!=HT_TENSOR))die("CAT: arr/str mismatch");
+    if(ha->ety!=hb->ety)die("CAT: arr element-type mismatch");
+    uint64_t n=ha->len+hb->len; Hdr*r=(Hdr*)uf_gc_alloc(sizeof(Hdr)+n*ha->esz,0);
+    UF_PROTECT(&r);
+    r->tag=HT_ARR; r->len=n; r->esz=ha->esz; r->ety=ha->ety;
+    memcpy(r->data,ha->data,ha->len*ha->esz); memcpy(r->data+ha->len*ha->esz,hb->data,hb->len*hb->esz);
+    UF_UNPROTECT(); pushp(cx,r); return;
+  }
+  { const char* x=uf_sptr(a),*y=uf_sptr(b); size_t la=strlen(x),lb=strlen(y);
+    Str* r=(Str*)uf_gc_alloc(sizeof(Str)+la+lb+1,0); r->tag=HT_STR; r->esz=1; r->len=la+lb; r->mlen=0;
+    memcpy(r->data,x,la); memcpy(r->data+la,y,lb+1); pushp(cx,r); }
+}
+/* SLICE: seq a b -> seq' (tag-dispatched; Python slice semantics) */
+static void op_slice(Ctx*cx){
+  Cell b=pop(cx),a=pop(cx),st=pop(cx);
+  Hdr*h=st.tag==T_PTR&&st.i?uf_gc_find((void*)st.i):0;
+  if(!h){ /* legacy raw char* */
+    const char* S=(const char*)st.i; int64_t n=(int64_t)strlen(S);
+    int64_t i=a.i,j=b.i; if(i<0)i+=n; if(j<0)j+=n; if(i<0)i=0; if(j<0)j=0; if(i>n)i=n; if(j>n)j=n; if(j<i)j=i;
+    pushc(cx,uf_str_new(S+i,(size_t)(j-i))); return;
+  }
+  int64_t n=(int64_t)h->len;
+  int64_t i=a.i,j=b.i; if(i<0)i+=n; if(j<0)j+=n; if(i<0)i=0; if(j<0)j=0; if(i>n)i=n; if(j>n)j=n; if(j<i)j=i;
+  if(h->tag==HT_STR){ Str*s=(Str*)h; pushc(cx,uf_str_new(uf_sbytes(s)+i,(size_t)(j-i))); return; }
+  if(h->tag==HT_BUF){ pushc(cx,uf_str_new(h->data+i,(size_t)(j-i))); return; }
+  if(h->tag==HT_DYN){
+    Dyn*d=(Dyn*)h; Dyn*r=uf_dyn_new((uint64_t)(j-i)); UF_PROTECT(&r);
+    for(int64_t q=i;q<j;q++)uf_dyn_push(&r,d->data[q]);
+    UF_UNPROTECT(); pushp(cx,r); return;
+  }
+  if(h->tag==HT_ARR||h->tag==HT_TENSOR){
+    Hdr*r=(Hdr*)uf_gc_alloc(sizeof(Hdr)+(size_t)(j-i)*h->esz,0);
+    r->tag=h->tag; r->len=(uint64_t)(j-i); r->esz=h->esz; r->ety=h->ety;
+    memcpy(r->data,uf_data(h)+i*h->esz,(size_t)(j-i)*h->esz);
+    pushp(cx,r); return;
+  }
+  die("SLICE: unsupported handle");
+}
+
+static void op_buf(Ctx*cx){ int64_t sz=pop(cx).i; if(sz<0)die("negative BUF size"); Hdr*h=(Hdr*)uf_gc_alloc(sizeof(Hdr)+(size_t)sz,0); h->tag=HT_BUF; h->len=(uint64_t)sz; h->esz=1; h->gc_flags|=GCF_PINNED; memset(h->data,0,(size_t)sz); pushp(cx,h); }
 static void op_bufcopy(Ctx*cx){ int64_t n=pop(cx).i; Cell s=pop(cx),d=pop(cx); if(n>0)memmove(((void*)d.i),((void*)s.i),(size_t)n); }
 static void op_loadx(Ctx*cx){ Cell a=pop(cx); pushi(cx,*(int64_t*)((void*)a.i)); }
 static void op_storex(Ctx*cx){ Cell a=pop(cx); Cell v=pop(cx); *(int64_t*)((void*)a.i)=v.i; }
@@ -111,7 +528,7 @@ static void op_malloc(Ctx*cx){ int64_t sz=pop(cx).i; if(sz<0)die("negative MALLO
 static void op_free(Ctx*cx){ Cell p=pop(cx); free(((void*)p.i)); }
 static void op_sizeof(Ctx*cx){ int64_t ty=pop(cx).i; pushi(cx,ty==3?1:8); }
 
-static void op_cat(Ctx*cx){ Cell b=pop(cx),a=pop(cx); size_t la=strlen((char*)((void*)a.i)),lb=strlen((char*)((void*)b.i)); char*r=(char*)uf_alloc(la+lb+1,0); memcpy(r,((void*)a.i),la); memcpy(r+la,((void*)b.i),lb+1); pushp(cx,r); }
+/* ================= fmt / print / scan ================= */
 static int uf_count(const char*f){ int c=0; for(;f&&*f;f++){ if(*f=='%'){ if(f[1]=='%'){ f++; } else { c++; if(f[1]=='*')c++; } } } return c; }
 static char* uf_fmt(const char*f,Cell*a,int n){
   size_t cap=256,bi=0; char*buf=(char*)uf_alloc(cap,0); int ai=0;
@@ -131,28 +548,32 @@ static char* uf_fmt(const char*f,Cell*a,int n){
       case 'd': case 'i': case 'u': case 'x': case 'X': case 'o': {
         { size_t l=strlen(d); d[l]='l'; d[l+1]='l'; d[l+2]=conv; d[l+3]=0; }
         tl=snprintf(tmp,sizeof(tmp),d,(unsigned long long)ar.i); break; }
-      case 'c': tl=snprintf(tmp,sizeof(tmp),d,(int)ar.i); break;
+      case 'c': { size_t l=strlen(d); d[l]=conv; d[l+1]=0; tl=snprintf(tmp,sizeof(tmp),d,(int)ar.i); break; }
       case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': {
         size_t l=strlen(d); d[l]=conv; d[l+1]=0;
         tl=snprintf(tmp,sizeof(tmp),d,uf_f(ar)); break; }
-      case 's': { size_t l=strlen(d); d[l]=conv; d[l+1]=0; tl=snprintf(tmp,sizeof(tmp),d,(char*)((void*)ar.i)); break; }
+      case 's': { size_t l=strlen(d); d[l]=conv; d[l+1]=0;
+        const char* sv=uf_sptr(ar);
+        int need=snprintf(0,0,d,sv);
+        while(bi+(size_t)need+1>cap){ cap*=2; buf=(char*)realloc(buf,cap); }
+        snprintf(buf+bi,(size_t)need+1,d,sv);
+        bi+=(size_t)need; continue; }
       case 'p': { size_t l=strlen(d); d[l]=conv; d[l+1]=0; tl=snprintf(tmp,sizeof(tmp),d,((void*)ar.i)); break; }
       default: die("FMT: unsupported directive");
     }
     if(tl<0) die("FMT failed");
+    if((size_t)tl>sizeof(tmp)) tl=sizeof(tmp); /* clamp to actual bytes written */
     while(bi+(size_t)tl+1>cap){ cap*=2; buf=(char*)realloc(buf,cap); }
     memcpy(buf+bi,tmp,(size_t)tl); bi+=(size_t)tl;
   }
   buf[bi]=0; return buf;
 }
-static void op_fmt(Ctx*cx){ Cell f=pop(cx); int n=uf_count((char*)((void*)f.i)); Cell args[16]; if(n>16)die("FMT: too many args"); for(int k=n-1;k>=0;k--) args[k]=pop(cx); pushp(cx,uf_fmt((char*)((void*)f.i),args,n)); }
+static void op_fmt(Ctx*cx){ Cell f=pop(cx); int n=uf_count(uf_sptr(f)); Cell args[16]; if(n>16)die("FMT: too many args"); for(int k=n-1;k>=0;k--) args[k]=pop(cx); char*s=uf_fmt(uf_sptr(f),args,n); Cell r=uf_str_new(s,strlen(s)); free(s); pushc(cx,r); }
 /* PRINT: fmt args.. -> n ; fmt is ON TOP with args below it (deepest first) */
-static void op_print(Ctx*cx){ Cell f=pop(cx); int n=uf_count((char*)((void*)f.i)); Cell args[16]; if(n>16)die("PRINT: too many args"); for(int k=n-1;k>=0;k--) args[k]=pop(cx); char*s=uf_fmt((char*)((void*)f.i),args,n); int r=printf("%s",s); pushi(cx,(int64_t)r); }
-/* SCAN: fmt -> values.. count ; per conversion fscanf(stdin,..):
-   %d/%i -> i64 (via "%lld"), %f/%e/%g -> f64 (via "%lf" into double),
-   %s -> freshly allocated string handle. Literal text in fmt unsupported. */
+static void op_print(Ctx*cx){ Cell f=pop(cx); int n=uf_count(uf_sptr(f)); Cell args[16]; if(n>16)die("PRINT: too many args"); for(int k=n-1;k>=0;k--) args[k]=pop(cx); char*s=uf_fmt(uf_sptr(f),args,n); int r=printf("%s",s); free(s); pushi(cx,(int64_t)r); }
+/* SCAN: fmt -> values.. count */
 static void op_scan(Ctx*cx){
-  Cell f=pop(cx); const char*p=(const char*)((void*)f.i); int n=0;
+  Cell f=pop(cx); const char*p=uf_sptr(f); int n=0;
   for(;*p;p++){
     if(*p=='%'){
       if(p[1]=='%'){ p++; continue; }
@@ -170,79 +591,192 @@ static void op_scan(Ctx*cx){
           if(fscanf(stdin,d,&v)!=1) die("SCAN: input error"); pushf(cx,v); n++; break; }
         case 's': {
           char*b=(char*)uf_alloc(1<<16,0);
-          if(fscanf(stdin,"%65535s",b)!=1) die("SCAN: input error"); pushp(cx,b); n++; break; }
+          if(fscanf(stdin,"%65535s",b)!=1) die("SCAN: input error"); Cell r=uf_str_new(b,strlen(b)); free(b); pushc(cx,r); n++; break; }
         default: die("SCAN: unsupported directive");
       }
     } else if(isspace((unsigned char)*p)) {
-      continue; /* fmt whitespace matches optional input whitespace implicitly */
+      continue;
     } else {
       die("SCAN: literal text in format unsupported");
     }
   }
   pushi(cx,(int64_t)n);
 }
-static int uf_vargc(Ctx*cx){ for(int t=0;t<cx->sp;t++){ Cell fc=cx->ds[cx->sp-1-t]; if(fc.tag==T_PTR&&((void*)fc.i)&&uf_count((char*)((void*)fc.i))==t) return t; } die("vararg call: format string not found"); return 0; }
+static int uf_vargc(Ctx*cx){ for(int t=0;t<cx->sp;t++){ Cell fc=cx->ds[cx->sp-1-t]; if(fc.tag==T_PTR&&((void*)fc.i)&&uf_count(uf_sptr(fc))==t) return t; } die("vararg call: format string not found"); return 0; }
 
-/* ---- v9: op-native datastructures ---- */
-/* DYN: growable Cell vector; IDX/SETI/LEN work via the shared header prefix */
-static void op_list(Ctx*cx){ Dyn*d=(Dyn*)uf_alloc(sizeof(Dyn)+8*sizeof(Cell),0); d->tag=HT_DYN; d->len=0; d->esz=sizeof(Cell); d->cap=8; pushp(cx,d); }
-static void op_append(Ctx*cx){ Cell v=pop(cx),h=pop(cx); Dyn*d=(Dyn*)((void*)h.i); if(d->tag!=HT_DYN)die("APPEND: not a list"); if(d->len>=d->cap){ d->cap*=2; d=(Dyn*)realloc(d,sizeof(Dyn)+d->cap*sizeof(Cell)); if(!d)die("out of memory"); } d->data[d->len++]=v; pushp(cx,d); }
-static void op_lpop(Ctx*cx){ Cell h=pop(cx); Dyn*d=(Dyn*)((void*)h.i); if(d->tag!=HT_DYN)die("POP: not a list"); if(d->len==0)die("POP: empty list"); pushc(cx,d->data[--d->len]); }
+/* ================= list / dict / chan / atom ops ================= */
+static void op_list(Ctx*cx){ pushp(cx,uf_dyn_new(8)); }
+/* PUSH (was APPEND): h v -> h' (list grows by move; the returned handle is
+   the live one — the old handle is reclaimed by the GC) */
+static void op_push(Ctx*cx){ Cell v=pop(cx),h=pop(cx); Hdr*a=uf_handle(h,"PUSH"); if(a->tag!=HT_DYN)die("PUSH: not a list"); pushp(cx,uf_dyn_push2((Dyn*)a,v)); }
+static void op_lpop(Ctx*cx){ Cell h=pop(cx); Hdr*a=uf_handle(h,"POP"); if(a->tag!=HT_DYN)die("POP: not a list"); Dyn*d=(Dyn*)a; if(d->len==0)die("POP: empty list"); pushc(cx,d->data[--d->len]); }
+static void op_dict(Ctx*cx){ pushp(cx,uf_map_new()); }
 
-/* MAP: open addressing, FNV-1a, tombstones, grow at 70% load.
-   Keys are cells: ints compare by value, pointers compare as C strings. */
-static uint64_t uf_fnv(const void*p,size_t n){ const unsigned char*s=(const unsigned char*)p; uint64_t h=1469598103934665603ULL; for(size_t i=0;i<n;i++){ h^=s[i]; h*=1099511628211ULL; } return h; }
-static uint64_t map_hash(Cell k){ if(k.tag==T_PTR&&((void*)k.i)) return uf_fnv(((void*)k.i),strlen((char*)((void*)k.i))); return uf_fnv(&k.i,8); }
-static int map_keyeq(Cell a,Cell b){ if(a.tag==T_PTR&&b.tag==T_PTR&&((void*)a.i)&&((void*)b.i)) return strcmp((char*)((void*)a.i),(char*)((void*)b.i))==0; return a.i==b.i; }
-static void map_put_raw(Map*m,Cell k,Cell v){
-  uint64_t i=map_hash(k)%m->cap;
-  for(;;){ if(m->st[i]!=1){ m->st[i]=1; m->keys[i]=k; m->vals[i]=v; m->len++; return; } if(map_keyeq(m->keys[i],k)){ m->vals[i]=v; return; } i=(i+1)%m->cap; }
-}
-static void map_grow(Map*m){
-  uint64_t ncap=m->cap*2; Cell*ok=m->keys,*ov=m->vals; unsigned char*os=m->st; uint64_t ocap=m->cap;
-  m->cap=ncap; m->keys=(Cell*)uf_alloc(ncap*sizeof(Cell),0); m->vals=(Cell*)uf_alloc(ncap*sizeof(Cell),0); m->st=(unsigned char*)calloc(ncap,1); m->len=0;
-  for(uint64_t i=0;i<ocap;i++) if(os[i]==1) map_put_raw(m,ok[i],ov[i]);
-  free(ok); free(ov); free(os);
-}
-static void op_dict(Ctx*cx){ Map*m=(Map*)uf_alloc(sizeof(Map),0); m->tag=HT_MAP; m->len=0; m->cap=16; m->keys=(Cell*)uf_alloc(16*sizeof(Cell),0); m->vals=(Cell*)uf_alloc(16*sizeof(Cell),0); m->st=(unsigned char*)calloc(16,1); pushp(cx,m); }
-/* DPUT: h k v ->  (v on top) */
-static void op_dput(Ctx*cx){ Cell v=pop(cx),k=pop(cx),h=pop(cx); Map*m=(Map*)((void*)h.i); if(m->tag!=HT_MAP)die("DPUT: not a dict"); if((m->len+1)*10>=m->cap*7) map_grow(m); map_put_raw(m,k,v); }
-/* DGET: h k -> v found (two cells; found flag on top) */
-static void op_dget(Ctx*cx){ Cell k=pop(cx),h=pop(cx); Map*m=(Map*)((void*)h.i); if(m->tag!=HT_MAP)die("DGET: not a dict"); uint64_t i=map_hash(k)%m->cap; for(;;){ if(m->st[i]==0){ pushi(cx,0); pushi(cx,0); return; } if(m->st[i]==1&&map_keyeq(m->keys[i],k)){ pushc(cx,m->vals[i]); pushi(cx,1); return; } i=(i+1)%m->cap; } }
-static void op_ddel(Ctx*cx){ Cell k=pop(cx),h=pop(cx); Map*m=(Map*)((void*)h.i); if(m->tag!=HT_MAP)die("DDEL: not a dict"); uint64_t i=map_hash(k)%m->cap; for(;;){ if(m->st[i]==0) return; if(m->st[i]==1&&map_keyeq(m->keys[i],k)){ m->st[i]=2; m->len--; return; } i=(i+1)%m->cap; } }
-static void op_dcount(Ctx*cx){ Cell h=pop(cx); Map*m=(Map*)((void*)h.i); if(m->tag!=HT_MAP)die("DCOUNT: not a dict"); pushi(cx,(int64_t)m->len); }
-static void op_dkeys(Ctx*cx){ Cell h=pop(cx); Map*m=(Map*)((void*)h.i); if(m->tag!=HT_MAP)die("DKEYS: not a dict"); Dyn*d=(Dyn*)uf_alloc(sizeof(Dyn)+(m->len?m->len:1)*sizeof(Cell),0); d->tag=HT_DYN; d->len=0; d->esz=sizeof(Cell); d->cap=m->len?m->len:1; for(uint64_t i=0;i<m->cap;i++) if(m->st[i]==1) d->data[d->len++]=m->keys[i]; pushp(cx,d); }
-
-/* RING/CHAN: bounded MPSC ring buffer with blocking ENQ/DEQ */
+/* CHAN: bounded MPSC ring buffer with blocking ENQ/DEQ */
 static void ring_enq(Ring*r,Cell v){ pthread_mutex_lock(&r->mu); while(r->len>=r->cap&&!r->closed) pthread_cond_wait(&r->notfull,&r->mu); if(r->closed){ pthread_mutex_unlock(&r->mu); die("ENQ: chan closed"); } r->buf[r->tail]=v; r->tail=(r->tail+1)%r->cap; r->len++; pthread_cond_signal(&r->notempty); pthread_mutex_unlock(&r->mu); }
 static void ring_close(Ring*r){ pthread_mutex_lock(&r->mu); r->closed=1; pthread_cond_broadcast(&r->notempty); pthread_cond_broadcast(&r->notfull); pthread_mutex_unlock(&r->mu); }
-/* CHAN: cap -> h */
-static void op_chan(Ctx*cx){ int64_t cap=pop(cx).i; if(cap<=0)cap=16; Ring*r=(Ring*)uf_alloc(sizeof(Ring),0); r->tag=HT_RING; r->len=0; r->cap=(uint64_t)cap; r->buf=(Cell*)uf_alloc((size_t)cap*sizeof(Cell),0); r->head=0; r->tail=0; r->closed=0; pthread_mutex_init(&r->mu,0); pthread_cond_init(&r->notfull,0); pthread_cond_init(&r->notempty,0); pushp(cx,r); }
-/* ENQ: h v ->  (blocks while full) */
-static void op_enq(Ctx*cx){ Cell v=pop(cx),h=pop(cx); Ring*r=(Ring*)((void*)h.i); if(r->tag!=HT_RING)die("ENQ: not a chan"); ring_enq(r,v); }
+/* blocking deq with close detection: 0 = got a value, 1 = closed+drained */
+static int ring_deq1(Ring*r,Cell*out){ pthread_mutex_lock(&r->mu); while(r->len==0&&!r->closed) pthread_cond_wait(&r->notempty,&r->mu); if(r->len==0){ pthread_mutex_unlock(&r->mu); return 1; } *out=r->buf[r->head]; r->head=(r->head+1)%r->cap; r->len--; pthread_cond_signal(&r->notfull); pthread_mutex_unlock(&r->mu); return 0; }
+static Ring* uf_ring_new(uint64_t cap){ if(!cap)cap=16; Ring*r=(Ring*)uf_gc_alloc(sizeof(Ring),0); r->tag=HT_RING; r->len=0; r->cap=cap; r->buf=(Cell*)uf_alloc((size_t)cap*sizeof(Cell),0); r->head=0; r->tail=0; r->closed=0; pthread_mutex_init(&r->mu,0); pthread_cond_init(&r->notfull,0); pthread_cond_init(&r->notempty,0); return r; }
+static void op_chan(Ctx*cx){ int64_t cap=pop(cx).i; if(cap<=0)cap=16; pushp(cx,uf_ring_new((uint64_t)cap)); }
+static void op_enq(Ctx*cx){ Cell v=pop(cx),h=pop(cx); Hdr*a=uf_handle(h,"ENQ"); if(a->tag!=HT_RING)die("ENQ: not a chan"); ring_enq((Ring*)a,v); }
 /* DEQ: h -> v  (blocks while empty; closed+empty yields sentinel 0) */
-static void op_deq(Ctx*cx){ Cell h=pop(cx); Ring*r=(Ring*)((void*)h.i); if(r->tag!=HT_RING)die("DEQ: not a chan"); pthread_mutex_lock(&r->mu); while(r->len==0&&!r->closed) pthread_cond_wait(&r->notempty,&r->mu); Cell v; if(r->len==0){ v=uf_mki(0); } else { v=r->buf[r->head]; r->head=(r->head+1)%r->cap; r->len--; pthread_cond_signal(&r->notfull); } pthread_mutex_unlock(&r->mu); pushc(cx,v); }
-static void op_close(Ctx*cx){ Cell h=pop(cx); Ring*r=(Ring*)((void*)h.i); if(r->tag!=HT_RING)die("CLOSE: not a chan"); ring_close(r); }
+static void op_deq(Ctx*cx){ Cell h=pop(cx); Hdr*a=uf_handle(h,"DEQ"); if(a->tag!=HT_RING)die("DEQ: not a chan"); Cell v; if(ring_deq1((Ring*)a,&v))v=uf_mki(0); pushc(cx,v); }
+static void op_close(Ctx*cx){ Cell h=pop(cx); Hdr*a=uf_handle(h,"CLOSE"); if(a->tag!=HT_RING)die("CLOSE: not a chan"); ring_close((Ring*)a); }
 
 /* ATOM: atomic i64 cell */
-static void op_atom(Ctx*cx){ Cell v=pop(cx); Atom*a=(Atom*)uf_alloc(sizeof(Atom),0); a->tag=HT_ATOM; a->len=1; atomic_store(&a->v,v.i); pushp(cx,a); }
-static void op_aget(Ctx*cx){ Cell h=pop(cx); Atom*a=(Atom*)((void*)h.i); if(a->tag!=HT_ATOM)die("AGET: not an atom"); pushi(cx,atomic_load(&a->v)); }
-static void op_aset(Ctx*cx){ Cell v=pop(cx),h=pop(cx); Atom*a=(Atom*)((void*)h.i); if(a->tag!=HT_ATOM)die("ASET: not an atom"); atomic_store(&a->v,v.i); }
-static void op_aadd(Ctx*cx){ Cell n=pop(cx),h=pop(cx); Atom*a=(Atom*)((void*)h.i); if(a->tag!=HT_ATOM)die("AADD: not an atom"); pushi(cx,atomic_fetch_add(&a->v,n.i)); }
-/* CAS: h old new -> 0/1 (new on top) */
-static void op_cas(Ctx*cx){ Cell nw=pop(cx),old=pop(cx),h=pop(cx); Atom*a=(Atom*)((void*)h.i); if(a->tag!=HT_ATOM)die("CAS: not an atom"); int64_t e=old.i; pushi(cx,atomic_compare_exchange_strong(&a->v,&e,nw.i)?1:0); }
+static void op_atom(Ctx*cx){ Cell v=pop(cx); Atom*a=(Atom*)uf_gc_alloc(sizeof(Atom),0); a->tag=HT_ATOM; a->len=1; atomic_store(&a->v,v.i); pushp(cx,a); }
+static void op_aget(Ctx*cx){ Cell h=pop(cx); Hdr*a=uf_handle(h,"AGET"); if(a->tag!=HT_ATOM)die("AGET: not an atom"); pushi(cx,atomic_load(&((Atom*)a)->v)); }
+static void op_aset(Ctx*cx){ Cell v=pop(cx),h=pop(cx); Hdr*a=uf_handle(h,"ASET"); if(a->tag!=HT_ATOM)die("ASET: not an atom"); atomic_store(&((Atom*)a)->v,v.i); }
+static void op_aadd(Ctx*cx){ Cell n=pop(cx),h=pop(cx); Hdr*a=uf_handle(h,"AADD"); if(a->tag!=HT_ATOM)die("AADD: not an atom"); pushi(cx,atomic_fetch_add(&((Atom*)a)->v,n.i)); }
+static void op_cas(Ctx*cx){ Cell nw=pop(cx),old=pop(cx),h=pop(cx); Hdr*a=uf_handle(h,"CAS"); if(a->tag!=HT_ATOM)die("CAS: not an atom"); int64_t e=old.i; pushi(cx,atomic_compare_exchange_strong(&((Atom*)a)->v,&e,nw.i)?1:0); }
 
-/* generalized LEN + TYPEOF over tagged handles */
-static void op_len(Ctx*cx){ Cell h=pop(cx); Hdr*a=(Hdr*)((void*)h.i); switch(a->tag){ case HT_ARR: case HT_TENSOR: case HT_DYN: case HT_MAP: case HT_RING: pushi(cx,(int64_t)a->len); return; case HT_ATOM: pushi(cx,1); return; default: die("LEN: handle has no length"); } }
-static void op_typeof(Ctx*cx){ Cell h=pop(cx); Hdr*a=(Hdr*)((void*)h.i); pushi(cx,(int64_t)a->tag); }
+/* RANGE: start stop -> list of ints [start, stop) */
+static void op_range(Ctx*cx){
+  int64_t stop=pop(cx).i, start=pop(cx).i;
+  int64_t n = stop>start ? stop-start : 0;
+  Dyn* d=uf_dyn_new((uint64_t)n); UF_PROTECT(&d);
+  for(int64_t k=start;k<stop;k++) uf_dyn_push(&d,uf_mki(k));
+  UF_UNPROTECT(); pushp(cx,d);
+}
 
-/* reflection tables, populated by generated uf_init_reflection() */
-static long uf_st_n=0; static const int64_t* uf_st_sids=0; static const int64_t* uf_st_nf=0; static const char*** uf_st_fields=0;
+/* ================= iterators ================= */
+static Iter* uf_iter_new(Cell src);
+static int uf_iter_next(Ctx*cx, Iter* it, Cell* out){
+  switch(it->kind){
+    case IT_LIST: { Dyn*d=(Dyn*)uf_gc_find((void*)it->src.i); if(!d)return 0; if((uint64_t)it->idx>=d->len)return 0; *out=d->data[it->idx++]; return 1; }
+    case IT_ARR: { Hdr*a=(Hdr*)uf_gc_find((void*)it->src.i); if(!a)return 0; if((uint64_t)it->idx>=a->len)return 0; *out=uf_cidx(it->src,it->idx++); return 1; }
+    case IT_DICT: { Map*m=(Map*)uf_gc_find((void*)it->src.i); if(!m)return 0; while((uint64_t)it->idx<m->cap&&m->st[it->idx]!=1)it->idx++; if((uint64_t)it->idx>=m->cap)return 0; *out=m->keys[it->idx++]; return 1; }
+    case IT_STR: { Str*s=(Str*)uf_gc_find((void*)it->src.i); if(!s)return 0; if((uint64_t)it->idx>=s->len)return 0; *out=uf_mki((uint8_t)uf_sbytes(s)[it->idx++]); return 1; }
+    case IT_CHAN: { Ring*r=(Ring*)uf_gc_find((void*)it->src.i); if(!r)return 0; return ring_deq1(r,out)?0:1; }
+    case IT_BITMAP: { Bitmap*b=(Bitmap*)uf_gc_find((void*)it->src.i); if(!b)return 0; uint64_t n=b->len; while((uint64_t)it->idx<n){ uint64_t w=(uint64_t)it->idx>>6, o=(uint64_t)it->idx&63; if((w<(n+63)/64)&&((b->words[w]>>o)&1)){ *out=uf_mki(it->idx++); return 1; } it->idx++; } return 0; }
+    case IT_MAP: { Iter* in=(Iter*)uf_gc_find((void*)it->g.i); if(!in)return 0; Cell v; if(!uf_iter_next(cx,in,&v))return 0; pushc(cx,v); uf_call_addr(cx,(const void*)it->f.i); *out=pop(cx); return 1; }
+    case IT_FILTER: { Iter* in=(Iter*)uf_gc_find((void*)it->g.i); if(!in)return 0; Cell v; while(uf_iter_next(cx,in,&v)){ pushc(cx,v); uf_call_addr(cx,(const void*)it->f.i); Cell r=pop(cx); if(!uf_zero(r)){ *out=v; return 1; } } return 0; }
+  }
+  return 0;
+}
+static Iter* uf_iter_new(Cell src){
+  if(src.tag!=T_PTR||!src.i)die("ITER: not iterable");
+  Hdr* h=uf_gc_find((void*)src.i); if(!h)die("ITER: not iterable");
+  int kind;
+  switch(h->tag){
+    case HT_DYN: kind=IT_LIST; break;
+    case HT_ARR: case HT_TENSOR: kind=IT_ARR; break;
+    case HT_MAP: kind=IT_DICT; break;
+    case HT_STR: kind=IT_STR; break;
+    case HT_RING: kind=IT_CHAN; break;
+    case HT_BITMAP: kind=IT_BITMAP; break;
+    default: die("ITER: not iterable");
+  }
+  Iter* it=(Iter*)uf_gc_alloc(sizeof(Iter),0);
+  it->tag=HT_ITER; it->len=1; it->src=src; it->kind=kind; it->idx=0; it->f=uf_mki(0); it->g=uf_mki(0);
+  return it;
+}
+static void op_iter(Ctx*cx){ Cell h=pop(cx); pushp(cx,uf_iter_new(h)); }
+static void op_next(Ctx*cx){
+  Cell h=pop(cx); Hdr*a=uf_handle(h,"NEXT"); if(a->tag!=HT_ITER)die("NEXT: not an iter");
+  Cell v; if(uf_iter_next(cx,(Iter*)a,&v)){ pushc(cx,v); pushi(cx,1); } else { pushi(cx,0); pushi(cx,0); }
+}
+static Dyn* uf_collect_it(Ctx*cx, Iter* it){
+  Dyn* d=uf_dyn_new(8); UF_PROTECT(&d); UF_PROTECT(&it);
+  Cell v; while(uf_iter_next(cx,it,&v)) uf_dyn_push(&d,v);
+  UF_UNPROTECT(); UF_UNPROTECT(); return d;
+}
+static void op_collect(Ctx*cx){ Cell h=pop(cx); Hdr*a=uf_handle(h,"COLLECT"); if(a->tag!=HT_ITER)die("COLLECT: not an iter"); pushp(cx,uf_collect_it(cx,(Iter*)a)); }
+static void op_imap(Ctx*cx){
+  Cell f=pop(cx),h=pop(cx); Hdr*a=uf_handle(h,"IMAP"); if(a->tag!=HT_ITER)die("IMAP: not an iter");
+  Iter* it=(Iter*)uf_gc_alloc(sizeof(Iter),0);
+  it->tag=HT_ITER; it->len=1; it->kind=IT_MAP; it->idx=0; it->src=uf_mki(0); it->f=f; it->g=h;
+  pushp(cx,it);
+}
+static void op_ifilter(Ctx*cx){
+  Cell f=pop(cx),h=pop(cx); Hdr*a=uf_handle(h,"IFILTER"); if(a->tag!=HT_ITER)die("IFILTER: not an iter");
+  Iter* it=(Iter*)uf_gc_alloc(sizeof(Iter),0);
+  it->tag=HT_ITER; it->len=1; it->kind=IT_FILTER; it->idx=0; it->src=uf_mki(0); it->f=f; it->g=h;
+  pushp(cx,it);
+}
+/* materialize any iterable (or iter, drained) into a list; lists pass through */
+static Dyn* uf_materialize(Ctx*cx, Cell h){
+  if(h.tag==T_PTR&&h.i){
+    Hdr* a=uf_gc_find((void*)h.i);
+    if(a){
+      if(a->tag==HT_DYN) return (Dyn*)a;
+      if(a->tag==HT_ITER) return uf_collect_it(cx,(Iter*)a);
+      if(a->tag==HT_ARR||a->tag==HT_TENSOR){
+        Dyn* d=uf_dyn_new(a->len); UF_PROTECT(&d);
+        for(uint64_t i=0;i<a->len;i++) uf_dyn_push(&d,uf_cidx(h,(int64_t)i));
+        UF_UNPROTECT(); return d;
+      }
+      if(a->tag==HT_MAP||a->tag==HT_STR||a->tag==HT_RING||a->tag==HT_BITMAP){
+        Iter* it=uf_iter_new(h); UF_PROTECT(&it); Dyn* d=uf_collect_it(cx,it); UF_UNPROTECT(); return d;
+      }
+    }
+  }
+  die("not a sequence");
+  return 0;
+}
 
-/* ---- wove-style task DAG scheduler ---- */
+/* ================= weave: static task DAG + dynamic fanout ================= */
 typedef void(*UfRun)(Ctx*,long);
-typedef struct { long pc; int ninputs; int inputs[8]; Cell result; _Atomic int state; } WeaveTask;
-typedef struct { WeaveTask* ts; int n; UfRun run; } WeaveJob;
+typedef struct { long pc; int ninputs; int* inputs; long count; Cell result; _Atomic int state; double t0,t1; long items; long retries; long tolerated; } WeaveTask;
+typedef struct WeaveJobS { WeaveTask* ts; int n; UfRun run; } WeaveJob;
+static void uf_weave_mark(struct WeaveJobS* j){ if(!j)return; for(int i=0;i<j->n;i++) uf_mark_cell(j->ts[i].result); }
+static double uf_nowd(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return ts.tv_sec+ts.tv_nsec/1e9; }
+
+/* fanout coordination: feeder drains the (iterable) first input into an
+   internal bounded chan; `count` workers pull items dynamically. Broadcast
+   inputs (declared after the first) sit beneath the item on each worker's
+   initial stack. Results collect in completion order. */
+typedef struct { WeaveJob* j; WeaveTask* t; Ring* q; Dyn* results; pthread_mutex_t* rmu; Iter* it; Ctx* fcx; } UfFan;
+static void* uf_fan_feeder(void* arg){
+  UfFan* f=(UfFan*)arg;
+  Cell v;
+  while(uf_iter_next(f->fcx,f->it,&v)) ring_enq(f->q,v);
+  ring_close(f->q);
+  return 0;
+}
+static void* uf_fan_worker(void* arg){
+  UfFan* f=(UfFan*)arg;
+  WeaveTask* t=f->t; WeaveJob* j=f->j;
+  Ctx* c=ctx_new(1<<16,1<<12);
+  uf_cur_task=t;
+  Cell item;
+  while(ring_deq1(f->q,&item)==0){
+    /* initial stack: broadcast inputs (declared order, deepest first), item on top */
+    for(int k=1;k<t->ninputs;k++) pushc(c,j->ts[t->inputs[k]].result);
+    pushc(c,item);
+    j->run(c,t->pc);
+    Cell r = c->sp>0 ? c->ds[c->sp-1] : uf_mki(0);
+    c->sp=0; c->csp=0; c->lsp=0;
+    pthread_mutex_lock(f->rmu);
+    f->results=uf_dyn_push2(f->results,r);
+    t->items++;
+    pthread_mutex_unlock(f->rmu);
+  }
+  uf_cur_task=0;
+  ctx_free(c);
+  return 0;
+}
+static void uf_run_fanout(WeaveJob* j, WeaveTask* t){
+  Cell input = j->ts[t->inputs[0]].result;
+  Iter* it = uf_iter_new(input); /* dies if not iterable */
+  Ring* q = uf_ring_new(64);
+  Dyn* results = uf_dyn_new(8);
+  pthread_mutex_t rmu; pthread_mutex_init(&rmu,0);
+  UF_PROTECT(&it); UF_PROTECT(&q); UF_PROTECT(&results);
+  UfFan f; f.j=j; f.t=t; f.q=q; f.results=results; f.rmu=&rmu; f.it=it;
+  f.fcx=ctx_new(1<<12,1<<8);
+  pthread_t ft; if(pthread_create(&ft,0,uf_fan_feeder,&f))die("WEAVE: feeder thread");
+  long nw=t->count; if(nw<1)nw=1; if(nw>64)nw=64;
+  pthread_t th[64];
+  for(long i=0;i<nw;i++) if(pthread_create(&th[i],0,uf_fan_worker,&f))die("WEAVE: worker thread");
+  for(long i=0;i<nw;i++) pthread_join(th[i],0);
+  pthread_join(ft,0);
+  ctx_free(f.fcx);
+  UF_UNPROTECT(); UF_UNPROTECT(); UF_UNPROTECT();
+  t->result=uf_mkp(f.results);
+  pthread_mutex_destroy(&rmu);
+}
 static void* uf_worker(void*arg){
   WeaveJob*j=(WeaveJob*)arg;
   for(;;){
@@ -261,41 +795,48 @@ static void* uf_worker(void*arg){
       sched_yield(); continue;
     }
     WeaveTask*t=&j->ts[pick];
-    Ctx*c=ctx_new(1<<16,1<<12);
-    for(int k=0;k<t->ninputs;k++) pushc(c,j->ts[t->inputs[k]].result);
-    j->run(c,t->pc);
-    t->result = c->sp>0 ? c->ds[c->sp-1] : (Cell){T_INT,0,0,0};
+    t->t0=uf_nowd();
+    uf_cur_task=t;
+    if(t->count>1){
+      uf_run_fanout(j,t);
+    } else {
+      Ctx*c=ctx_new(1<<16,1<<12);
+      for(int k=0;k<t->ninputs;k++) pushc(c,j->ts[t->inputs[k]].result);
+      j->run(c,t->pc);
+      t->result = c->sp>0 ? c->ds[c->sp-1] : uf_mki(0);
+      t->items = 1;
+      ctx_free(c);
+    }
+    uf_cur_task=0;
+    t->t1=uf_nowd();
     atomic_store(&t->state,2);
-    free(c->ds); free((void*)c->cs); free(c);
   }
 }
 static void uf_weave(Ctx*cx,WeaveTask*ts,int n,UfRun run){
   (void)cx;
   long ncpu=sysconf(_SC_NPROCESSORS_ONLN);
-  int nw=n; if(ncpu>0&&(long)nw>ncpu)nw=(int)ncpu; if(nw<1)nw=1; if(nw>64)nw=64;
+  long total=0; for(int i=0;i<n;i++) total += ts[i].count>1?ts[i].count:1;
+  int nw=(int)total; if(ncpu>0&&(long)nw>ncpu)nw=(int)ncpu; if(nw<1)nw=1; if(nw>64)nw=64;
   WeaveJob j={ts,n,run};
-  if(nw<=1){ uf_worker(&j); return; }
-  pthread_t th[64];
-  for(int i=0;i<nw-1;i++) pthread_create(&th[i],0,uf_worker,&j);
-  uf_worker(&j);
-  for(int i=0;i<nw-1;i++) pthread_join(th[i],0);
-}
-/* FIELDS: obj -> dyn of interned field-name strings */
-static void op_fields(Ctx*cx){
-  Cell h=pop(cx); Hdr*a=(Hdr*)((void*)h.i); if(a->tag!=HT_OBJ)die("FIELDS: not an object");
-  int64_t sid=(int64_t)a->len; const char**fs=0; int64_t nf=0;
-  for(long q=0;q<uf_st_n;q++) if(uf_st_sids[q]==sid){ fs=uf_st_fields[q]; nf=uf_st_nf[q]; break; }
-  if(!fs&&nf==0) die("FIELDS: unknown struct id");
-  Dyn*d=(Dyn*)uf_alloc(sizeof(Dyn)+(nf?nf:1)*sizeof(Cell),0); d->tag=HT_DYN; d->len=0; d->esz=sizeof(Cell); d->cap=nf?nf:1;
-  for(int64_t q=0;q<nf;q++){ Cell c=uf_mkp((void*)fs[q]); d->data[d->len++]=c; }
-  pushp(cx,d);
+  uf_active_job=&j;
+  if(nw<=1){ uf_worker(&j); }
+  else {
+    pthread_t th[64];
+    for(int i=0;i<nw-1;i++) pthread_create(&th[i],0,uf_worker,&j);
+    uf_worker(&j);
+    for(int i=0;i<nw-1;i++) pthread_join(th[i],0);
+  }
+  uf_active_job=0;
+  if(getenv("UF_WEAVE_DEBUG")){
+    for(int i=0;i<n;i++){
+      WeaveTask*t=&ts[i];
+      fprintf(stderr,"weave: task pc=%ld wall=%.3fms workers=%ld items=%ld retries=%ld tolerated=%ld\n",
+        t->pc,(t->t1-t->t0)*1e3,t->count,t->items,t->retries,t->tolerated);
+    }
+  }
 }
 
-/* ================= shared string/list helpers ================= */
-static char* uf_str_dup_n(const char*s,size_t n){ char*r=(char*)uf_alloc(n+1,0); memcpy(r,s,n); r[n]=0; return r; }
-static Dyn* uf_dyn_new(uint64_t cap){ if(!cap)cap=1; Dyn*d=(Dyn*)uf_alloc(sizeof(Dyn)+cap*sizeof(Cell),0); d->tag=HT_DYN; d->len=0; d->esz=sizeof(Cell); d->cap=cap; return d; }
-static void uf_dyn_push(Dyn**pd,Cell c){ Dyn*d=*pd; if(d->len>=d->cap){ d->cap*=2; d=(Dyn*)realloc(d,sizeof(Dyn)+d->cap*sizeof(Cell)); if(!d)die("out of memory"); *pd=d; } d->data[d->len++]=c; }
-static void uf_dyn_push_str(Dyn**pd,const char*s,size_t n){ char*p=uf_str_dup_n(s,n); Cell c=uf_mkp((void*)p); uf_dyn_push(pd,c); }
+/* ================= shared string helpers ================= */
 static char* uf_read_all(FILE*f){
   size_t cap=4096,n=0; char*b=(char*)uf_alloc(cap,0); size_t m;
   while((m=fread(b+n,1,cap-1-n,f))>0){ n+=m; if(cap-1-n==0){ cap*=2; b=(char*)realloc(b,cap); if(!b)die("out of memory"); } }
@@ -313,25 +854,26 @@ static int uf_wait_status(int r){
 }
 
 /* ================= shell ops ================= */
-/* SH: cmd -> status (stdio inherited, platform shell) */
-static void op_sh(Ctx*cx){ Cell c=pop(cx); pushi(cx,uf_wait_status(system((char*)((void*)c.i)))); }
-/* SHX: cmd -> out err status (capture stdout+stderr; status on top) */
-static void op_shx(Ctx*cx){
-  Cell c=pop(cx); char*cmd=(char*)((void*)c.i);
+/* SH (merged SH+SHX): cmd -> out err status (always captures both streams
+   as fresh strings; status on top: -1 spawn failure, 128+signal) */
+static void op_sh(Ctx*cx){
+  Cell c=pop(cx); const char*cmd=uf_sptr(c);
 #ifdef _WIN32
   char tmp[256]; tmpnam(tmp);
   char*full=(char*)uf_alloc(strlen(cmd)+strlen(tmp)+8,0);
   sprintf(full,"%s 2>%s",cmd,tmp);
-  FILE* f=_popen(full,"r"); if(!f)die("SHX: spawn failed");
+  FILE* f=_popen(full,"r"); if(!f){ pushc(cx,uf_str_new("",0)); pushc(cx,uf_str_new("",0)); pushi(cx,-1); return; }
   char*out=uf_read_all(f); int st=uf_wait_status(_pclose(f));
   FILE* ef=fopen(tmp,"r"); char*err;
-  if(ef){ err=uf_read_all(ef); fclose(ef); remove(tmp); } else err=uf_str_dup_n("",0);
-  pushp(cx,out); pushp(cx,err); pushi(cx,st);
+  if(ef){ err=uf_read_all(ef); fclose(ef); remove(tmp); } else err=uf_alloc(1,0),err[0]=0;
+  Cell so=uf_str_new(out,strlen(out)); Cell se=uf_str_new(err,strlen(err));
+  free(out); free(err); free(full);
+  pushc(cx,so); pushc(cx,se); pushi(cx,st);
 #else
-  int pfd[2]; if(pipe(pfd))die("SHX: pipe");
-  FILE* ef=tmpfile(); if(!ef)die("SHX: tmpfile");
+  int pfd[2]; if(pipe(pfd))die("SH: pipe");
+  FILE* ef=tmpfile(); if(!ef)die("SH: tmpfile");
   pid_t pid=fork();
-  if(pid<0)die("SHX: fork");
+  if(pid<0)die("SH: fork");
   if(pid==0){
     close(pfd[0]);
     if(dup2(pfd[1],1)<0)_exit(127);
@@ -340,32 +882,15 @@ static void op_shx(Ctx*cx){
     _exit(127);
   }
   close(pfd[1]);
-  FILE* f=fdopen(pfd[0],"r"); if(!f)die("SHX: fdopen");
+  FILE* f=fdopen(pfd[0],"r"); if(!f)die("SH: fdopen");
   char*out=uf_read_all(f); fclose(f);
   int rs=0; waitpid(pid,&rs,0);
   int st=uf_wait_status(rs);
   rewind(ef); char*err=uf_read_all(ef); fclose(ef);
-  pushp(cx,out); pushp(cx,err); pushi(cx,st);
+  Cell so=uf_str_new(out,strlen(out)); Cell se=uf_str_new(err,strlen(err));
+  free(out); free(err);
+  pushc(cx,so); pushc(cx,se); pushi(cx,st);
 #endif
-}
-/* SHL: cmd -> list (stdout split into lines; dies on spawn failure only) */
-static void op_shl(Ctx*cx){
-  Cell c=pop(cx);
-#ifdef _WIN32
-  FILE* f=_popen((char*)((void*)c.i),"r");
-  if(!f)die("SHL: spawn failed");
-  Dyn*d=uf_dyn_new(8); char line[16384];
-  while(fgets(line,sizeof(line),f)){ size_t m=strlen(line); while(m>0&&(line[m-1]=='\n'||line[m-1]=='\r'))line[--m]=0; uf_dyn_push_str(&d,line,m); }
-  _pclose(f);
-#else
-  FILE* f=popen((char*)((void*)c.i),"r");
-  if(!f)die("SHL: spawn failed");
-  Dyn*d=uf_dyn_new(8);
-  char*line=0; size_t ncap=0; ssize_t m;
-  while((m=getline(&line,&ncap,f))>=0){ while(m>0&&(line[m-1]=='\n'||line[m-1]=='\r'))line[--m]=0; uf_dyn_push_str(&d,line,(size_t)m); }
-  free(line); pclose(f);
-#endif
-  pushp(cx,d);
 }
 /* SHP: cmd -> chan (worker thread streams stdout lines, closes chan at exit) */
 typedef struct { Ring* r; char* cmd; } UfShp;
@@ -379,11 +904,11 @@ static void* uf_shp_worker(void*arg){
   if(f){
 #ifdef _WIN32
     char line[16384];
-    while(fgets(line,sizeof(line),f)){ size_t m=strlen(line); while(m>0&&(line[m-1]=='\n'||line[m-1]=='\r'))line[--m]=0; char*p=uf_str_dup_n(line,m); Cell v=uf_mkp((void*)p); ring_enq(g->r,v); }
+    while(fgets(line,sizeof(line),f)){ size_t m=strlen(line); while(m>0&&(line[m-1]=='\n'||line[m-1]=='\r'))line[--m]=0; Cell v=uf_str_new(line,m); ring_enq(g->r,v); }
     _pclose(f);
 #else
     char*line=0; size_t ncap=0; ssize_t m;
-    while((m=getline(&line,&ncap,f))>=0){ while(m>0&&(line[m-1]=='\n'||line[m-1]=='\r'))line[--m]=0; char*p=uf_str_dup_n(line,(size_t)m); Cell v=uf_mkp((void*)p); ring_enq(g->r,v); }
+    while((m=getline(&line,&ncap,f))>=0){ while(m>0&&(line[m-1]=='\n'||line[m-1]=='\r'))line[--m]=0; Cell v=uf_str_new(line,(size_t)m); ring_enq(g->r,v); }
     free(line); pclose(f);
 #endif
   }
@@ -393,18 +918,19 @@ static void* uf_shp_worker(void*arg){
 }
 static void op_shp(Ctx*cx){
   Cell c=pop(cx);
-  Ring*r=(Ring*)uf_alloc(sizeof(Ring),0); r->tag=HT_RING; r->len=0; r->cap=64; r->buf=(Cell*)uf_alloc(64*sizeof(Cell),0); r->head=0; r->tail=0; r->closed=0; pthread_mutex_init(&r->mu,0); pthread_cond_init(&r->notfull,0); pthread_cond_init(&r->notempty,0);
-  UfShp* g=(UfShp*)malloc(sizeof(UfShp)); if(!g)die("out of memory"); g->r=r; g->cmd=(char*)((void*)c.i);
+  Ring*r=uf_ring_new(64);
+  UfShp* g=(UfShp*)malloc(sizeof(UfShp)); if(!g)die("out of memory"); g->r=r; g->cmd=strdup(uf_sptr(c));
   pthread_t th; if(pthread_create(&th,0,uf_shp_worker,g)){ ring_close(r); die("SHP: thread"); }
   pthread_detach(th);
   pushp(cx,r);
 }
-/* EXEC: list -> status (argv list, no shell; fork+execvp/waitpid or _spawnvp) */
+/* EXEC: list -> status (argv list, no shell) */
 static void op_exec(Ctx*cx){
-  Cell h=pop(cx); Dyn*d=(Dyn*)((void*)h.i); if(d->tag!=HT_DYN)die("EXEC: not a list");
+  Cell h=pop(cx); Hdr*a=uf_handle(h,"EXEC"); if(a->tag!=HT_DYN)die("EXEC: not a list");
+  Dyn*d=(Dyn*)a;
   if(d->len==0)die("EXEC: empty argv");
   char**argv=(char**)malloc((d->len+1)*sizeof(char*)); if(!argv)die("out of memory");
-  for(uint64_t i=0;i<d->len;i++)argv[i]=(char*)((void*)d->data[i].i);
+  for(uint64_t i=0;i<d->len;i++)argv[i]=(char*)uf_sptr(d->data[i]);
   argv[d->len]=0;
 #ifdef _WIN32
   intptr_t r=_spawnvp(_P_WAIT,argv[0],(const char* const*)argv);
@@ -418,17 +944,13 @@ static void op_exec(Ctx*cx){
   free(argv); pushi(cx,st);
 }
 
-/* ================= embedded regex =================
-   Small backtracking engine (no deps). Syntax: literals, '.', '*', '+', '?',
-   '[...]' (ranges, '^' negation, escape via '\'), '^' at alternative start,
-   '$' at alternative end, '|' alternation, '(' ... ')' capture groups (<=9).
-   Greedy matching with backtracking; a quantified atom never loops on an
-   empty match. */
+/* ================= embedded regex (unchanged from v9) =================
+   Syntax: literals, '.', '*', '+', '?', '[...]' (ranges, '^' negation),
+   '^' at alternative start, '$' at end, '|' alternation, '(' ')' groups
+   (<=9, \\1..\\9 backrefs in REPLACE). Greedy with backtracking. */
 typedef struct { const char* s; const char* e; } RxCap;
 enum { RXA_LIT=0, RXA_DOT=1, RXA_CLS=2, RXA_GRP=3 };
 typedef struct { int type; char ch; const char* cs; const char* ce; const char* gs; const char* ge; int cap; } RxAtom;
-
-/* p just after '[': find the closing ']' (']' first is literal, '\' escapes) */
 static int rx_cls_find(const char* p, const char** close){
   if(*p=='^')p++;
   if(*p==']')p++;
@@ -439,7 +961,6 @@ static int rx_cls_find(const char* p, const char** close){
   }
   return 0;
 }
-/* class body [cs,ce): does it contain c? */
 static int rx_cls_in(const char* cs, const char* ce, char c){
   int neg=0; const char* p=cs;
   if(p<ce&&*p=='^'){ neg=1; p++; }
@@ -457,7 +978,6 @@ static int rx_cls_in(const char* cs, const char* ce, char c){
   }
   return neg?!ok:ok;
 }
-/* number of '(' in [pat0,p), skipping classes and escapes */
 static int rx_group_index(const char* pat0, const char* p){
   int n=0; const char* q=pat0;
   while(q<p){
@@ -471,9 +991,9 @@ static int rx_group_index(const char* pat0, const char* p){
 static const char* rx_parse_atom(const char* p, RxAtom* a, const char* pat0){
   memset(a,0,sizeof(*a));
   char c=*p;
-  if(c=='\\'){ if(!p[1])die("RX: trailing backslash"); a->type=RXA_LIT; a->ch=p[1]; return p+2; }
+  if(c=='\\'){ if(!p[1])die("MATCH: trailing backslash"); a->type=RXA_LIT; a->ch=p[1]; return p+2; }
   if(c=='.'){ a->type=RXA_DOT; return p+1; }
-  if(c=='['){ const char* cl; if(!rx_cls_find(p+1,&cl))die("RX: unbalanced ["); a->type=RXA_CLS; a->cs=p+1; a->ce=cl; return cl+1; }
+  if(c=='['){ const char* cl; if(!rx_cls_find(p+1,&cl))die("MATCH: unbalanced ["); a->type=RXA_CLS; a->cs=p+1; a->ce=cl; return cl+1; }
   if(c=='('){
     int depth=1; const char* q=p+1;
     while(*q&&depth){
@@ -483,15 +1003,14 @@ static const char* rx_parse_atom(const char* p, RxAtom* a, const char* pat0){
       else if(*q==')')depth--;
       q++;
     }
-    if(depth)die("RX: unbalanced (");
+    if(depth)die("MATCH: unbalanced (");
     a->type=RXA_GRP; a->gs=p+1; a->ge=q-1; a->cap=rx_group_index(pat0,p)+1;
-    if(a->cap>9)die("RX: more than 9 groups");
+    if(a->cap>9)die("MATCH: more than 9 groups");
     return q;
   }
   a->type=RXA_LIT; a->ch=c; return p+1;
 }
 static const char* rx_seq(const char* p, const char* pend, const char* s, RxCap* caps, const char* pat0);
-/* match one occurrence of atom a at s; NULL on no match */
 static const char* rx_atom1(RxAtom* a, const char* s, RxCap* caps, const char* pat0){
   switch(a->type){
   case RXA_LIT: return (*s&&*s==a->ch)?s+1:0;
@@ -518,7 +1037,6 @@ static const char* rx_atom1(RxAtom* a, const char* s, RxCap* caps, const char* p
   }
   return 0;
 }
-/* match pattern segment [p,pend) at s; end pointer on success, NULL on fail */
 static const char* rx_seq(const char* p, const char* pend, const char* s, RxCap* caps, const char* pat0){
   if(p>=pend)return s;
   if(*p=='$'&&p+1==pend)return *s==0?s:0;
@@ -534,7 +1052,6 @@ static const char* rx_seq(const char* p, const char* pend, const char* s, RxCap*
     if(min==0)return rx_seq(q,pend,s,caps,pat0);
     return 0;
   }
-  /* greedy repetition with backtracking; never loops on an empty match */
   size_t capn=16,n=0; const char**v=(const char**)malloc(capn*sizeof(char*));
   if(!v)die("out of memory");
   v[n++]=s;
@@ -552,7 +1069,6 @@ static const char* rx_seq(const char* p, const char* pend, const char* s, RxCap*
   free(v);
   return ok;
 }
-/* try pattern (with top-level alternation) at/after str; fills caps (0=whole) */
 static int rx_exec(const char* pat, const char* str, RxCap* caps){
   const char* alt=pat;
   for(;;){
@@ -580,27 +1096,28 @@ static int rx_exec(const char* pat, const char* str, RxCap* caps){
   }
 }
 
-/* RX: str pat -> list found (group 0 = whole match; found on top) */
-static void op_rx(Ctx*cx){
+/* MATCH (was RX): str pat -> list found (group 0 = whole match; found on top) */
+static void op_match(Ctx*cx){
   Cell pat=pop(cx),st=pop(cx);
-  const char* P=(char*)((void*)pat.i); const char* S=(char*)((void*)st.i);
+  const char* P=uf_sptr(pat); const char* S=uf_sptr(st);
   RxCap caps[10];
   int ntotal=rx_group_index(P,P+strlen(P));
   if(rx_exec(P,S,caps)){
-    Dyn*d=uf_dyn_new((uint64_t)ntotal+1);
+    Dyn*d=uf_dyn_new((uint64_t)ntotal+1); UF_PROTECT(&d);
     for(int i=0;i<=ntotal;i++){
       if(caps[i].s) uf_dyn_push_str(&d,caps[i].s,(size_t)(caps[i].e-caps[i].s));
       else uf_dyn_push_str(&d,"",0);
     }
+    UF_UNPROTECT();
     pushp(cx,d); pushi(cx,1);
   } else {
     Dyn*d=uf_dyn_new(1); pushp(cx,d); pushi(cx,0);
   }
 }
-/* RXSUB: str pat repl -> str' (replace ALL matches; repl: \1..\9, \\) */
-static void op_rxsub(Ctx*cx){
+/* REPLACE (was RXSUB): str pat repl -> str' (all matches; \\1..\\9, \\\\) */
+static void op_replace(Ctx*cx){
   Cell repl=pop(cx),pat=pop(cx),st=pop(cx);
-  const char* R=(char*)((void*)repl.i); const char* P=(char*)((void*)pat.i); const char* S=(char*)((void*)st.i);
+  const char* R=uf_sptr(repl); const char* P=uf_sptr(pat); const char* S=uf_sptr(st);
   size_t cap=256,n=0; char*out=(char*)uf_alloc(cap,0);
   RxCap caps[10];
   const char* cur=S;
@@ -618,25 +1135,25 @@ static void op_rxsub(Ctx*cx){
   }
   UF_APP(cur,strlen(cur));
 #undef UF_APP
-  out[n]=0; pushp(cx,out);
+  out[n]=0; Cell r=uf_str_new(out,n); free(out); pushc(cx,r);
 }
-/* RXSPLIT: str pat -> list (pieces between matches; empty matches skipped) */
-static void op_rxsplit(Ctx*cx){
+/* RSPLIT (was RXSPLIT): str pat -> list */
+static void op_rsplit(Ctx*cx){
   Cell pat=pop(cx),st=pop(cx);
-  const char* P=(char*)((void*)pat.i); const char* cur=(char*)((void*)st.i);
-  Dyn*d=uf_dyn_new(8); RxCap caps[10];
+  const char* P=uf_sptr(pat); const char* cur=uf_sptr(st);
+  Dyn*d=uf_dyn_new(8); UF_PROTECT(&d); RxCap caps[10];
   while(rx_exec(P,cur,caps)){
     if(caps[0].e==caps[0].s){ if(!*cur)break; cur++; continue; }
     uf_dyn_push_str(&d,cur,(size_t)(caps[0].s-cur));
     cur=caps[0].e;
   }
   uf_dyn_push_str(&d,cur,strlen(cur));
+  UF_UNPROTECT();
   pushp(cx,d);
 }
 
 /* ================= string ops ================= */
 #ifdef _WIN32
-/* fnmatch fallback: '*', '?', '[...]' (ranges, '!' negation) */
 static int uf_glob_match(const char* pat,const char* s){
   while(*pat){
     if(*pat=='*'){
@@ -670,22 +1187,22 @@ static int uf_glob_match(const char* pat,const char* s){
   return *s==0;
 }
 #endif
-/* GLOB: str pat -> 0/1 (fnmatch-style: '*', '?', '[...]') */
+/* GLOB: str pat -> 0/1 */
 static void op_glob(Ctx*cx){
   Cell pat=pop(cx),st=pop(cx);
 #ifdef _WIN32
-  pushi(cx,uf_glob_match((char*)((void*)pat.i),(char*)((void*)st.i))?1:0);
+  pushi(cx,uf_glob_match(uf_sptr(pat),uf_sptr(st))?1:0);
 #else
-  pushi(cx,fnmatch((char*)((void*)pat.i),(char*)((void*)st.i),0)==0?1:0);
+  pushi(cx,fnmatch(uf_sptr(pat),uf_sptr(st),0)==0?1:0);
 #endif
 }
-/* SPLIT: str sep -> list (literal separator; pieces, tail included) */
+/* SPLIT: str sep -> list (literal separator) */
 static void op_split(Ctx*cx){
   Cell sep=pop(cx),st=pop(cx);
-  const char* S=(char*)((void*)st.i); const char* E=(char*)((void*)sep.i);
+  const char* S=uf_sptr(st); const char* E=uf_sptr(sep);
   if(!*E)die("SPLIT: empty separator");
   size_t el=strlen(E);
-  Dyn*d=uf_dyn_new(8);
+  Dyn*d=uf_dyn_new(8); UF_PROTECT(&d);
   const char* cur=S;
   for(;;){
     const char* m=strstr(cur,E);
@@ -694,42 +1211,34 @@ static void op_split(Ctx*cx){
     cur=m+el;
   }
   uf_dyn_push_str(&d,cur,strlen(cur));
+  UF_UNPROTECT();
   pushp(cx,d);
 }
-/* JOIN: list sep -> str (list of strings) */
+/* JOIN: list sep -> str */
 static void op_join(Ctx*cx){
   Cell sep=pop(cx),h=pop(cx);
-  Dyn*d=(Dyn*)((void*)h.i); if(d->tag!=HT_DYN)die("JOIN: not a list");
-  const char* E=(char*)((void*)sep.i); size_t el=strlen(E);
-  size_t cap=64; for(uint64_t i=0;i<d->len;i++)cap+=strlen((char*)((void*)d->data[i].i))+el;
+  Hdr*a=uf_handle(h,"JOIN"); if(a->tag!=HT_DYN)die("JOIN: not a list");
+  Dyn*d=(Dyn*)a;
+  const char* E=uf_sptr(sep); size_t el=strlen(E);
+  size_t cap=64; for(uint64_t i=0;i<d->len;i++)cap+=strlen(uf_sptr(d->data[i]))+el;
   char*out=(char*)uf_alloc(cap,0); size_t n=0;
   for(uint64_t i=0;i<d->len;i++){
     if(i){ memcpy(out+n,E,el); n+=el; }
-    size_t L=strlen((char*)((void*)d->data[i].i)); memcpy(out+n,(char*)((void*)d->data[i].i),L); n+=L;
+    const char* s=uf_sptr(d->data[i]); size_t L=strlen(s); memcpy(out+n,s,L); n+=L;
   }
-  out[n]=0; pushp(cx,out);
-}
-/* SLICE: str a b -> str' (Python slice: negatives from end, clamped; byte idx) */
-static void op_slice(Ctx*cx){
-  Cell b=pop(cx),a=pop(cx),st=pop(cx);
-  const char* S=(char*)((void*)st.i); int64_t n=(int64_t)strlen(S);
-  int64_t i=a.i,j=b.i;
-  if(i<0)i+=n; if(j<0)j+=n;
-  if(i<0)i=0; if(j<0)j=0;
-  if(i>n)i=n; if(j>n)j=n;
-  if(j<i)j=i;
-  pushp(cx,uf_str_dup_n(S+i,(size_t)(j-i)));
+  out[n]=0; Cell r=uf_str_new(out,n); free(out); pushc(cx,r);
 }
 /* FIND: str sub -> idx (-1 on miss; byte index) */
 static void op_find(Ctx*cx){
   Cell sub=pop(cx),st=pop(cx);
-  const char* m=strstr((char*)((void*)st.i),(char*)((void*)sub.i));
-  pushi(cx,m?m-(char*)((void*)st.i):-1);
+  const char* S=uf_sptr(st);
+  const char* m=strstr(S,uf_sptr(sub));
+  pushi(cx,m?m-S:-1);
 }
 /* REPL: str old new -> str' (literal, replace all) */
 static void op_repl(Ctx*cx){
   Cell nw=pop(cx),old=pop(cx),st=pop(cx);
-  const char* S=(char*)((void*)st.i); const char* O=(char*)((void*)old.i); const char* N=(char*)((void*)nw.i);
+  const char* S=uf_sptr(st); const char* O=uf_sptr(old); const char* N=uf_sptr(nw);
   if(!*O)die("REPL: empty pattern");
   size_t ol=strlen(O),nl=strlen(N);
   size_t cap=strlen(S)+64,n=0; char*out=(char*)uf_alloc(cap,0);
@@ -745,20 +1254,735 @@ static void op_repl(Ctx*cx){
   size_t tail=strlen(cur);
   while(n+tail+1>cap){ cap*=2; out=(char*)realloc(out,cap); if(!out)die("out of memory"); }
   memcpy(out+n,cur,tail); n+=tail;
-  out[n]=0; pushp(cx,out);
+  out[n]=0; Cell r=uf_str_new(out,n); free(out); pushc(cx,r);
 }
-/* TRIM: str -> str' (isspace, both ends) */
+/* TRIM: str -> str' */
 static void op_trim(Ctx*cx){
   Cell st=pop(cx);
-  const char* s=(char*)((void*)st.i); size_t n=strlen(s);
+  const char* s=uf_sptr(st); size_t n=strlen(s);
   while(n>0&&isspace((unsigned char)s[0])){ s++; n--; }
   while(n>0&&isspace((unsigned char)s[n-1]))n--;
-  pushp(cx,uf_str_dup_n(s,n));
+  pushc(cx,uf_str_new(s,n));
 }
 /* UP/DOWN: str -> str' (ASCII case) */
-static void op_up(Ctx*cx){ Cell st=pop(cx); char*s=(char*)((void*)st.i); size_t n=strlen(s); char*r=(char*)uf_alloc(n+1,0); for(size_t i=0;i<n;i++)r[i]=(s[i]>='a'&&s[i]<='z')?(char)(s[i]-32):s[i]; r[n]=0; pushp(cx,r); }
-static void op_down(Ctx*cx){ Cell st=pop(cx); char*s=(char*)((void*)st.i); size_t n=strlen(s); char*r=(char*)uf_alloc(n+1,0); for(size_t i=0;i<n;i++)r[i]=(s[i]>='A'&&s[i]<='Z')?(char)(s[i]+32):s[i]; r[n]=0; pushp(cx,r); }
+static void op_up(Ctx*cx){ Cell st=pop(cx); const char*s=uf_sptr(st); size_t n=strlen(s); char*r=(char*)uf_alloc(n+1,0); for(size_t i=0;i<n;i++)r[i]=(s[i]>='a'&&s[i]<='z')?(char)(s[i]-32):s[i]; r[n]=0; Cell c=uf_str_new(r,n); free(r); pushc(cx,c); }
+static void op_down(Ctx*cx){ Cell st=pop(cx); const char*s=uf_sptr(st); size_t n=strlen(s); char*r=(char*)uf_alloc(n+1,0); for(size_t i=0;i<n;i++)r[i]=(s[i]>='A'&&s[i]<='Z')?(char)(s[i]+32):s[i]; r[n]=0; Cell c=uf_str_new(r,n); free(r); pushc(cx,c); }
 /* STARTS/ENDS: str affix -> 0/1 */
-static void op_starts(Ctx*cx){ Cell af=pop(cx),st=pop(cx); const char*s=(char*)((void*)st.i); const char*a=(char*)((void*)af.i); pushi(cx,strncmp(s,a,strlen(a))==0?1:0); }
-static void op_ends(Ctx*cx){ Cell af=pop(cx),st=pop(cx); const char*s=(char*)((void*)st.i); const char*a=(char*)((void*)af.i); size_t ls=strlen(s),la=strlen(a); pushi(cx,(la<=ls&&strcmp(s+ls-la,a)==0)?1:0); }
+static void op_starts(Ctx*cx){ Cell af=pop(cx),st=pop(cx); const char*s=uf_sptr(st); const char*a=uf_sptr(af); pushi(cx,strncmp(s,a,strlen(a))==0?1:0); }
+static void op_ends(Ctx*cx){ Cell af=pop(cx),st=pop(cx); const char*s=uf_sptr(st); const char*a=uf_sptr(af); size_t ls=strlen(s),la=strlen(a); pushi(cx,(la<=ls&&strcmp(s+ls-la,a)==0)?1:0); }
+
+/* ================= sequences: sort/filter/some/every ================= */
+/* stable mergesort of a cell array with uf_cmp order; dies on incomparable */
+static void uf_msort(Cell* v, Cell* tmp, uint64_t lo, uint64_t hi){
+  if(hi-lo<2)return;
+  uint64_t mid=(lo+hi)/2;
+  uf_msort(v,tmp,lo,mid); uf_msort(v,tmp,mid,hi);
+  uint64_t i=lo,j=mid,k=lo;
+  while(i<mid&&j<hi){ int ok; int c=uf_cmp(v[i],v[j],&ok); if(!ok)die("SORT: incomparable element types"); if(c<=0)tmp[k++]=v[i++]; else tmp[k++]=v[j++]; }
+  while(i<mid)tmp[k++]=v[i++];
+  while(j<hi)tmp[k++]=v[j++];
+  for(i=lo;i<hi;i++)v[i]=tmp[i];
+}
+/* SORT: seq -> seq' (fresh, stable; list -> list, arr -> arr by tag) */
+static void op_sort(Ctx*cx){
+  Cell h=pop(cx);
+  Hdr* a=h.tag==T_PTR&&h.i?uf_gc_find((void*)h.i):0;
+  Dyn* d=uf_materialize(cx,h); UF_PROTECT(&d);
+  if(d->len){
+    Cell* tmp=(Cell*)uf_alloc(d->len*sizeof(Cell),0);
+    uf_msort(d->data,tmp,0,d->len);
+    free(tmp);
+  }
+  if(a&&(a->tag==HT_ARR||a->tag==HT_TENSOR)){
+    Hdr* r=(Hdr*)uf_gc_alloc(sizeof(Hdr)+d->len*a->esz,0);
+    UF_PROTECT(&r);
+    r->tag=a->tag; r->len=d->len; r->esz=a->esz; r->ety=a->ety;
+    for(uint64_t i=0;i<d->len;i++) uf_cseti(uf_mkp(r),(int64_t)i,d->data[i]);
+    UF_UNPROTECT(); UF_UNPROTECT();
+    pushp(cx,r); return;
+  }
+  Dyn* r=uf_dyn_new(d->len); UF_PROTECT(&r);
+  for(uint64_t i=0;i<d->len;i++)uf_dyn_push(&r,d->data[i]);
+  UF_UNPROTECT(); UF_UNPROTECT();
+  pushp(cx,r);
+}
+/* FILTER: list pred_addr -> list' */
+static void op_filter(Ctx*cx){
+  Cell f=pop(cx),h=pop(cx);
+  Dyn* s=uf_materialize(cx,h); UF_PROTECT(&s);
+  Dyn* r=uf_dyn_new(8); UF_PROTECT(&r);
+  for(uint64_t i=0;i<s->len;i++){
+    pushc(cx,s->data[i]); uf_call_addr(cx,(const void*)f.i); Cell k=pop(cx);
+    if(!uf_zero(k)) uf_dyn_push(&r,s->data[i]);
+  }
+  UF_UNPROTECT(); UF_UNPROTECT();
+  pushp(cx,r);
+}
+/* SOME/EVERY: list pred_addr -> 0/1 (short-circuit) */
+static void op_some(Ctx*cx){
+  Cell f=pop(cx),h=pop(cx); Dyn* s=uf_materialize(cx,h); UF_PROTECT(&s);
+  int r=0;
+  for(uint64_t i=0;i<s->len;i++){ pushc(cx,s->data[i]); uf_call_addr(cx,(const void*)f.i); if(!uf_zero(pop(cx))){r=1;break;} }
+  UF_UNPROTECT(); pushi(cx,r);
+}
+static void op_every(Ctx*cx){
+  Cell f=pop(cx),h=pop(cx); Dyn* s=uf_materialize(cx,h); UF_PROTECT(&s);
+  int r=1;
+  for(uint64_t i=0;i<s->len;i++){ pushc(cx,s->data[i]); uf_call_addr(cx,(const void*)f.i); if(uf_zero(pop(cx))){r=0;break;} }
+  UF_UNPROTECT(); pushi(cx,r);
+}
+
+/* ================= vector ops + bitmap masks ================= */
+static double uf_el(Hdr*a,uint64_t i){ char*dt=uf_data(a); if(a->ety==1)return ((double*)dt)[i]; if(a->ety==3)return (double)((uint8_t*)dt)[i]; return (double)((int64_t*)dt)[i]; }
+static void uf_put_el(Hdr*a,uint64_t i,double d){ char*dt=uf_data(a); if(a->ety==1)((double*)dt)[i]=d; else if(a->ety==3)((uint8_t*)dt)[i]=(uint8_t)d; else ((int64_t*)dt)[i]=(int64_t)d; }
+static Hdr* uf_arr_like(Hdr*a,uint64_t n){ Hdr*r=(Hdr*)uf_gc_alloc(sizeof(Hdr)+n*a->esz,0); r->tag=a->tag; r->len=n; r->esz=a->esz; r->ety=a->ety; return r; }
+static Hdr* uf_vcheck(Cell h,const char*op){ Hdr*a=uf_handle(h,op); if(a->tag!=HT_ARR&&a->tag!=HT_TENSOR)die("vector op: not an arr"); return a; }
+/* scalar arr ops: arr scalar -> arr' */
+#define UF_VSOP(NAME,EXPR,ZERO_DIE) \
+static void NAME(Ctx*cx){ Cell s=pop(cx),h=pop(cx); Hdr*a=uf_vcheck(h,#NAME); \
+  uint64_t n=a->len; Hdr*r=uf_arr_like(a,n); UF_PROTECT(&r); \
+  if(a->ety==1||s.tag==T_FLOAT){ double d=uf_f(s); if(ZERO_DIE&&d==0.0)die(#NAME ": zero scalar"); for(uint64_t i=0;i<n;i++)uf_put_el(r,i,(EXPR)); } \
+  else { int64_t d=s.i; if(ZERO_DIE&&d==0)die(#NAME ": zero scalar"); for(uint64_t i=0;i<n;i++)uf_put_el(r,i,(EXPR)); } \
+  UF_UNPROTECT(); pushp(cx,r); }
+UF_VSOP(op_vadd, uf_el(a,i)+d, 0)
+UF_VSOP(op_vsub, uf_el(a,i)-d, 0)
+UF_VSOP(op_vmul, uf_el(a,i)*d, 0)
+UF_VSOP(op_vdiv, uf_el(a,i)/d, 1)
+/* elementwise arr arr ops: length mismatch dies */
+#define UF_VEOP(NAME,EXPR,ZERO_DIE) \
+static void NAME(Ctx*cx){ Cell h2=pop(cx),h1=pop(cx); Hdr*a=uf_vcheck(h1,#NAME); Hdr*b=uf_vcheck(h2,#NAME); \
+  if(a->len!=b->len)die(#NAME ": length mismatch"); \
+  uint64_t n=a->len; Hdr*r=uf_arr_like(a,n); UF_PROTECT(&r); \
+  if(ZERO_DIE) for(uint64_t i=0;i<n;i++) if(uf_el(b,i)==0.0)die(#NAME ": zero divisor"); \
+  for(uint64_t i=0;i<n;i++)uf_put_el(r,i,(EXPR)); \
+  UF_UNPROTECT(); pushp(cx,r); }
+UF_VEOP(op_veadd, uf_el(a,i)+uf_el(b,i), 0)
+UF_VEOP(op_vesub, uf_el(a,i)-uf_el(b,i), 0)
+UF_VEOP(op_vemul, uf_el(a,i)*uf_el(b,i), 0)
+UF_VEOP(op_vediv, uf_el(a,i)/uf_el(b,i), 1)
+UF_VEOP(op_vemax, uf_el(a,i)>uf_el(b,i)?uf_el(a,i):uf_el(b,i), 0)
+UF_VEOP(op_vemin, uf_el(a,i)<uf_el(b,i)?uf_el(a,i):uf_el(b,i), 0)
+/* comparisons: arr scalar -> bitmap */
+static Bitmap* uf_bm_new(uint64_t nbits){ Bitmap*b=(Bitmap*)uf_gc_alloc(sizeof(Bitmap)+((nbits+63)/64)*8,0); b->tag=HT_BITMAP; b->len=nbits; b->esz=8; memset(b->words,0,((nbits+63)/64)*8); return b; }
+#define UF_VCOP(NAME,EXPR) \
+static void NAME(Ctx*cx){ Cell s=pop(cx),h=pop(cx); Hdr*a=uf_vcheck(h,#NAME); \
+  uint64_t n=a->len; Bitmap*r=uf_bm_new(n); UF_PROTECT(&r); \
+  double d=uf_f(s); \
+  for(uint64_t i=0;i<n;i++) if(EXPR) r->words[i>>6]|=(1ULL<<(i&63)); \
+  UF_UNPROTECT(); pushp(cx,r); }
+UF_VCOP(op_veq, uf_el(a,i)==d)
+UF_VCOP(op_vlt, uf_el(a,i)<d)
+UF_VCOP(op_vgt, uf_el(a,i)>d)
+UF_VCOP(op_vge, uf_el(a,i)>=d)
+UF_VCOP(op_vle, uf_el(a,i)<=d)
+/* bitmap logic */
+static Bitmap* uf_bm_check(Cell h){ Hdr*a=uf_handle(h,"bitmap op"); if(a->tag!=HT_BITMAP)die("bitmap op: not a bitmap"); return (Bitmap*)a; }
+static void op_vand(Ctx*cx){ Cell h2=pop(cx),h1=pop(cx); Bitmap*a=uf_bm_check(h1),*b=uf_bm_check(h2); if(a->len!=b->len)die("VAND: length mismatch"); uint64_t w=(a->len+63)/64; Bitmap*r=uf_bm_new(a->len); UF_PROTECT(&r); for(uint64_t i=0;i<w;i++)r->words[i]=a->words[i]&b->words[i]; UF_UNPROTECT(); pushp(cx,r); }
+static void op_vor(Ctx*cx){ Cell h2=pop(cx),h1=pop(cx); Bitmap*a=uf_bm_check(h1),*b=uf_bm_check(h2); if(a->len!=b->len)die("VOR: length mismatch"); uint64_t w=(a->len+63)/64; Bitmap*r=uf_bm_new(a->len); UF_PROTECT(&r); for(uint64_t i=0;i<w;i++)r->words[i]=a->words[i]|b->words[i]; UF_UNPROTECT(); pushp(cx,r); }
+static void op_vnot(Ctx*cx){ Cell h=pop(cx); Bitmap*a=uf_bm_check(h); uint64_t w=(a->len+63)/64; Bitmap*r=uf_bm_new(a->len); UF_PROTECT(&r); for(uint64_t i=0;i<w;i++)r->words[i]=~a->words[i]; if(a->len&63)r->words[w-1]&=(1ULL<<(a->len&63))-1; UF_UNPROTECT(); pushp(cx,r); }
+static void op_vcount(Ctx*cx){ Cell h=pop(cx); Bitmap*a=uf_bm_check(h); uint64_t w=(a->len+63)/64,n=0; for(uint64_t i=0;i<w;i++)n+=(uint64_t)__builtin_popcountll(a->words[i]); pushi(cx,(int64_t)n); }
+/* VGATHER: arr bm -> arr' (keep set-bit elements) */
+static void op_vgather(Ctx*cx){
+  Cell h2=pop(cx),h1=pop(cx); Hdr*a=uf_vcheck(h1,"VGATHER"); Bitmap*b=uf_bm_check(h2);
+  if(a->len!=b->len)die("VGATHER: length mismatch");
+  uint64_t n=0; for(uint64_t i=0;i<a->len;i++) if((b->words[i>>6]>>(i&63))&1)n++;
+  Hdr*r=uf_arr_like(a,n); UF_PROTECT(&r);
+  uint64_t k=0; for(uint64_t i=0;i<a->len;i++) if((b->words[i>>6]>>(i&63))&1)uf_put_el(r,k++,uf_el(a,i));
+  UF_UNPROTECT(); pushp(cx,r);
+}
+/* reductions */
+static void op_vsum(Ctx*cx){ Cell h=pop(cx); Hdr*a=uf_vcheck(h,"VSUM"); double s=0; for(uint64_t i=0;i<a->len;i++)s+=uf_el(a,i); if(a->ety==1)pushf(cx,s); else pushi(cx,(int64_t)s); }
+static void op_vmean(Ctx*cx){ Cell h=pop(cx); Hdr*a=uf_vcheck(h,"VMEAN"); if(!a->len)die("VMEAN: empty arr"); double s=0; for(uint64_t i=0;i<a->len;i++)s+=uf_el(a,i); pushf(cx,s/(double)a->len); }
+static void op_vmin(Ctx*cx){ Cell h=pop(cx); Hdr*a=uf_vcheck(h,"VMIN"); if(!a->len)die("VMIN: empty arr"); double s=uf_el(a,0); for(uint64_t i=1;i<a->len;i++){double d=uf_el(a,i);if(d<s)s=d;} if(a->ety==1)pushf(cx,s); else pushi(cx,(int64_t)s); }
+static void op_vmax(Ctx*cx){ Cell h=pop(cx); Hdr*a=uf_vcheck(h,"VMAX"); if(!a->len)die("VMAX: empty arr"); double s=uf_el(a,0); for(uint64_t i=1;i<a->len;i++){double d=uf_el(a,i);if(d>s)s=d;} if(a->ety==1)pushf(cx,s); else pushi(cx,(int64_t)s); }
+/* VMAP: arr fn_addr -> arr' ; VFOLD: arr init fn_addr -> acc */
+static void op_vmap(Ctx*cx){
+  Cell f=pop(cx),h=pop(cx); Hdr*a=uf_vcheck(h,"VMAP");
+  Hdr*r=uf_arr_like(a,a->len); UF_PROTECT(&r);
+  for(uint64_t i=0;i<a->len;i++){
+    if(a->ety==1)pushf(cx,uf_el(a,i)); else pushi(cx,(int64_t)uf_el(a,i));
+    uf_call_addr(cx,(const void*)f.i);
+    uf_put_el(r,i,uf_f(pop(cx)));
+  }
+  UF_UNPROTECT(); pushp(cx,r);
+}
+static void op_vfold(Ctx*cx){
+  Cell f=pop(cx),acc=pop(cx),h=pop(cx); Hdr*a=uf_vcheck(h,"VFOLD");
+  for(uint64_t i=0;i<a->len;i++){
+    pushc(cx,acc);
+    if(a->ety==1)pushf(cx,uf_el(a,i)); else pushi(cx,(int64_t)uf_el(a,i));
+    uf_call_addr(cx,(const void*)f.i);
+    acc=pop(cx);
+  }
+  pushc(cx,acc);
+}
+/* VARGSORT: arr -> idx_arr (stable) */
+static void op_vargsort(Ctx*cx){
+  Cell h=pop(cx); Hdr*a=uf_vcheck(h,"VARGSORT");
+  uint64_t n=a->len;
+  int64_t* idx=(int64_t*)uf_alloc((n?n:1)*8,0); int64_t* tmp=(int64_t*)uf_alloc((n?n:1)*8,0);
+  for(uint64_t i=0;i<n;i++)idx[i]=(int64_t)i;
+  /* stable mergesort of indices by element value */
+  for(uint64_t w=1;w<n;w*=2){
+    for(uint64_t lo=0;lo<n;lo+=2*w){
+      uint64_t mid=lo+w<n?lo+w:n, hi=lo+2*w<n?lo+2*w:n;
+      uint64_t i=lo,j=mid,k=lo;
+      while(i<mid&&j<hi){ if(uf_el(a,(uint64_t)idx[i])<=uf_el(a,(uint64_t)idx[j]))tmp[k++]=idx[i++]; else tmp[k++]=idx[j++]; }
+      while(i<mid)tmp[k++]=idx[i++];
+      while(j<hi)tmp[k++]=idx[j++];
+    }
+    int64_t* t=idx; idx=tmp; tmp=t;
+  }
+  Hdr*r=(Hdr*)uf_gc_alloc(sizeof(Hdr)+n*8,0); r->tag=HT_ARR; r->len=n; r->esz=8; r->ety=0;
+  memcpy(r->data,idx,n*8); free(idx); free(tmp);
+  pushp(cx,r);
+}
+/* VSEARCHSORTED: sorted_arr val -> idx (insertion point) */
+static void op_vsearchsorted(Ctx*cx){
+  Cell v=pop(cx),h=pop(cx); Hdr*a=uf_vcheck(h,"VSEARCHSORTED");
+  double d=uf_f(v); uint64_t lo=0,hi=a->len;
+  while(lo<hi){ uint64_t mid=(lo+hi)/2; if(uf_el(a,mid)<d)lo=mid+1; else hi=mid; }
+  pushi(cx,(int64_t)lo);
+}
+/* VWHERE: arr arr bm -> arr' (bit set -> first arr, else second) */
+static void op_vwhere(Ctx*cx){
+  Cell h3=pop(cx),h2=pop(cx),h1=pop(cx);
+  Hdr*a=uf_vcheck(h1,"VWHERE"); Hdr*b=uf_vcheck(h2,"VWHERE"); Bitmap*m=uf_bm_check(h3);
+  if(a->len!=b->len||a->len!=m->len)die("VWHERE: length mismatch");
+  Hdr*r=uf_arr_like(a,a->len); UF_PROTECT(&r);
+  for(uint64_t i=0;i<a->len;i++) uf_put_el(r,i, ((m->words[i>>6]>>(i&63))&1)?uf_el(a,i):uf_el(b,i));
+  UF_UNPROTECT(); pushp(cx,r);
+}
+
+/* ================= data ops: group/agg/unique/flat/chunk ================= */
+/* GROUP: list fn_addr -> dict (key -> list of elems, insertion-ordered keys) */
+static void op_group(Ctx*cx){
+  Cell f=pop(cx),h=pop(cx);
+  Dyn* s=uf_materialize(cx,h); UF_PROTECT(&s);
+  Map* m=uf_map_new(); UF_PROTECT(&m);
+  Dyn* order=uf_dyn_new(8); UF_PROTECT(&order);
+  for(uint64_t i=0;i<s->len;i++){
+    pushc(cx,s->data[i]); uf_call_addr(cx,(const void*)f.i); Cell key=pop(cx);
+    Cell lst;
+    if(map_get(m,key,&lst)){ Dyn* nd=uf_dyn_push2((Dyn*)uf_gc_find((void*)lst.i),s->data[i]); if((void*)nd!=(void*)lst.i) map_put(m,key,uf_mkp(nd)); }
+    else { Dyn* d=uf_dyn_new(4); d=uf_dyn_push2(d,s->data[i]); map_put(m,key,uf_mkp(d)); uf_dyn_push(&order,key); }
+  }
+  UF_UNPROTECT(); UF_UNPROTECT(); UF_UNPROTECT();
+  pushp(cx,m);
+}
+/* AGG: dict fn_addr -> dict' (map each group's value-list through fn) */
+static void op_agg(Ctx*cx){
+  Cell f=pop(cx),h=pop(cx); Hdr*a=uf_handle(h,"AGG"); if(a->tag!=HT_MAP)die("AGG: not a dict");
+  Map* m=(Map*)a;
+  Map* r=uf_map_new(); UF_PROTECT(&r);
+  for(uint64_t i=0;i<m->cap;i++) if(m->st[i]==1){
+    pushc(cx,m->vals[i]); uf_call_addr(cx,(const void*)f.i); Cell v=pop(cx);
+    map_put(r,m->keys[i],v);
+  }
+  UF_UNPROTECT(); pushp(cx,r);
+}
+/* UNIQUE: list -> list' (dedup, first-occurrence order; dict-hashable elems) */
+static void op_unique(Ctx*cx){
+  Cell h=pop(cx);
+  Dyn* s=uf_materialize(cx,h); UF_PROTECT(&s);
+  Map* seen=uf_map_new(); UF_PROTECT(&seen);
+  Dyn* r=uf_dyn_new(s->len); UF_PROTECT(&r);
+  for(uint64_t i=0;i<s->len;i++){
+    Cell v;
+    if(!map_get(seen,s->data[i],&v)){ map_put(seen,s->data[i],uf_mki(1)); uf_dyn_push(&r,s->data[i]); }
+  }
+  UF_UNPROTECT(); UF_UNPROTECT(); UF_UNPROTECT();
+  pushp(cx,r);
+}
+/* FLAT: list -> list' (flatten one level; non-list elements pass through) */
+static void op_flat(Ctx*cx){
+  Cell h=pop(cx);
+  Dyn* s=uf_materialize(cx,h); UF_PROTECT(&s);
+  Dyn* r=uf_dyn_new(8); UF_PROTECT(&r);
+  for(uint64_t i=0;i<s->len;i++){
+    Cell e=s->data[i]; Hdr* eh=e.tag==T_PTR&&e.i?uf_gc_find((void*)e.i):0;
+    if(eh&&eh->tag==HT_DYN){ Dyn* d=(Dyn*)eh; for(uint64_t j=0;j<d->len;j++)uf_dyn_push(&r,d->data[j]); }
+    else uf_dyn_push(&r,e);
+  }
+  UF_UNPROTECT(); UF_UNPROTECT();
+  pushp(cx,r);
+}
+/* CHUNK: seq size -> list of pieces (last may be short) */
+static void op_chunk(Ctx*cx){
+  int64_t sz=pop(cx).i; Cell h=pop(cx);
+  if(sz<1)die("CHUNK: size < 1");
+  Hdr* a=h.tag==T_PTR&&h.i?uf_gc_find((void*)h.i):0;
+  int isarr = a&&(a->tag==HT_ARR||a->tag==HT_TENSOR);
+  Dyn* s=uf_materialize(cx,h); UF_PROTECT(&s);
+  Dyn* r=uf_dyn_new(s->len/(uint64_t)sz+1); UF_PROTECT(&r);
+  for(uint64_t i=0;i<s->len;i+=(uint64_t)sz){
+    uint64_t n=s->len-i<(uint64_t)sz?s->len-i:(uint64_t)sz;
+    if(isarr){
+      Hdr* p=(Hdr*)uf_gc_alloc(sizeof(Hdr)+n*a->esz,0);
+      p->tag=a->tag; p->len=n; p->esz=a->esz; p->ety=a->ety;
+      for(uint64_t j=0;j<n;j++)uf_cseti(uf_mkp(p),(int64_t)j,s->data[i+j]);
+      uf_dyn_push(&r,uf_mkp(p));
+    } else {
+      Dyn* p=uf_dyn_new(n);
+      for(uint64_t j=0;j<n;j++)p=uf_dyn_push2(p,s->data[i+j]);
+      uf_dyn_push(&r,uf_mkp(p));
+    }
+  }
+  UF_UNPROTECT(); UF_UNPROTECT();
+  pushp(cx,r);
+}
+
+/* ================= time ops (scalar cells: tag 15 time, 16 dur, i64 nanos) ================= */
+static void op_now(Ctx*cx){ struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts); Cell c; c.tag=T_TIME; c.i=(int64_t)ts.tv_sec*1000000000LL+(int64_t)ts.tv_nsec; pushc(cx,c); }
+/* TIME: str fmt -> t ; fmt "unix" (float s) or strptime(3) */
+static void op_time(Ctx*cx){
+  Cell fmt=pop(cx),st=pop(cx);
+  const char* F=uf_sptr(fmt); const char* S=uf_sptr(st);
+  int64_t ns;
+  if(strcmp(F,"unix")==0){ double d=strtod(S,0); ns=(int64_t)(d*1e9); }
+  else {
+    struct tm tm; memset(&tm,0,sizeof tm);
+    if(!strptime(S,F,&tm))die("TIME: unparseable");
+    time_t t=mktime(&tm);
+    ns=(int64_t)t*1000000000LL;
+  }
+  Cell c; c.tag=T_TIME; c.i=ns; pushc(cx,c);
+}
+/* TIMEF: t fmt -> str ; fmt "unix" or strftime(3) (process TZ via libc) */
+static void op_timef(Ctx*cx){
+  Cell fmt=pop(cx),t=pop(cx);
+  const char* F=uf_sptr(fmt);
+  char buf[256];
+  if(strcmp(F,"unix")==0){ snprintf(buf,sizeof buf,"%.9f",(double)t.i/1e9); }
+  else {
+    time_t s=(time_t)(t.i/1000000000LL);
+    struct tm tm; localtime_r(&s,&tm);
+    if(!strftime(buf,sizeof buf,F,&tm))die("TIMEF: format failed");
+  }
+  pushc(cx,uf_str_new(buf,strlen(buf)));
+}
+
+/* ================= bloom filter (tag 17; double-hashed FNV-1a) ================= */
+static void op_bloom(Ctx*cx){
+  int64_t n=pop(cx).i; if(n<1)die("BLOOM: n < 1");
+  uint64_t bits=(uint64_t)((double)n*9.585)+64; /* ~1% FP */
+  Bloom* b=(Bloom*)uf_gc_alloc(sizeof(Bloom)+((bits+63)/64)*8,0);
+  b->tag=HT_BLOOM; b->len=bits; b->esz=8; b->k=7;
+  memset(b->words,0,((bits+63)/64)*8);
+  pushp(cx,b);
+}
+static void uf_bloom_hashes(Cell v,uint64_t* h1,uint64_t* h2){
+  if(uf_is_str(v)){ const char* s=uf_sptr(v); size_t n=strlen(s); *h1=uf_fnv(s,n); *h2=uf_fnv(s,n)^0x9e3779b97f4a7c15ULL; *h2=uf_fnv(h2,8); }
+  else { *h1=uf_fnv(&v.i,8); uint64_t x=(uint64_t)v.i^0x9e3779b97f4a7c15ULL; *h2=uf_fnv(&x,8); }
+  if(!*h2)*h2=0x100000001b3ULL;
+}
+static void op_badd(Ctx*cx){
+  Cell v=pop(cx),h=pop(cx); Hdr*a=uf_handle(h,"BADD"); if(a->tag!=HT_BLOOM)die("BADD: not a bloom filter");
+  Bloom* b=(Bloom*)a; uint64_t h1,h2; uf_bloom_hashes(v,&h1,&h2);
+  for(int i=0;i<b->k;i++){ uint64_t p=(h1+(uint64_t)i*h2)%b->len; b->words[p>>6]|=(1ULL<<(p&63)); }
+}
+static void op_btest(Ctx*cx){
+  Cell v=pop(cx),h=pop(cx); Hdr*a=uf_handle(h,"BTEST"); if(a->tag!=HT_BLOOM)die("BTEST: not a bloom filter");
+  Bloom* b=(Bloom*)a; uint64_t h1,h2; uf_bloom_hashes(v,&h1,&h2);
+  for(int i=0;i<b->k;i++){ uint64_t p=(h1+(uint64_t)i*h2)%b->len; if(!((b->words[p>>6]>>(p&63))&1)){ pushi(cx,0); return; } }
+  pushi(cx,1);
+}
+
+/* ================= script I/O ================= */
+/* SLURP: path -> str (whole file; not found/unreadable: dies) */
+static void op_slurp(Ctx*cx){
+  Cell p=pop(cx);
+  FILE* f=fopen(uf_sptr(p),"rb"); if(!f)die("SLURP: cannot open file");
+  char* b=uf_read_all(f); fclose(f);
+  Cell r=uf_str_new(b,strlen(b)); free(b); pushc(cx,r);
+}
+/* SPIT: path str ->  (create/truncate; error: dies) */
+static void op_spit(Ctx*cx){
+  Cell st=pop(cx),p=pop(cx);
+  FILE* f=fopen(uf_sptr(p),"wb"); if(!f)die("SPIT: cannot open file");
+  const char* s=uf_sptr(st); size_t n=strlen(s);
+  if(n&&fwrite(s,1,n,f)!=n){ fclose(f); die("SPIT: write failed"); }
+  fclose(f);
+}
+/* ARGV: -> list of strings */
+static void op_argv(Ctx*cx){
+  Dyn* d=uf_dyn_new((uint64_t)uf_argc); UF_PROTECT(&d);
+  char** av=(char**)uf_argv;
+  for(int64_t i=0;i<uf_argc;i++){ Cell s=uf_str_new(av[i],strlen(av[i])); uf_dyn_push(&d,s); }
+  UF_UNPROTECT(); pushp(cx,d);
+}
+
+/* ================= zero-copy file access + streaming ================= */
+/* MMAP: path -> str (read-only zero-copy; tag str, GC-registered, munmap'd
+   when swept; falls back to an owned copy for page-aligned sizes so the
+   NUL terminator never crosses the mapping) */
+static void op_mmap(Ctx*cx){
+  Cell p=pop(cx);
+  const char* path=uf_sptr(p);
+  int fd=open(path,O_RDONLY); if(fd<0)die("MMAP: cannot open file");
+  struct stat sb; if(fstat(fd,&sb)<0){ close(fd); die("MMAP: stat failed"); }
+  uint64_t n=(uint64_t)sb.st_size;
+  if(n%4096==0){ /* no tail slack for the NUL: owned copy fallback */
+    Str* s=(Str*)uf_gc_alloc(sizeof(Str)+n+1,0);
+    s->tag=HT_STR; s->len=n; s->esz=1; s->mlen=0;
+    ssize_t got=read(fd,s->data,n); close(fd);
+    if(got<0)die("MMAP: read failed");
+    s->len=(uint64_t)got; s->data[got]=0;
+    pushp(cx,s); return;
+  }
+  /* last partial page zero-fills past EOF, so data[n]==0 for free */
+  uint64_t flen=(n+4095)&~(uint64_t)4095;
+  void* fm=mmap(0,flen,PROT_READ,MAP_PRIVATE,fd,0);
+  close(fd);
+  if(fm==MAP_FAILED)die("MMAP: map failed");
+  Str* s=(Str*)uf_gc_alloc(sizeof(Str),0);
+  s->tag=HT_STR; s->len=n; s->esz=1; s->mlen=flen; s->mdata=(const char*)fm;
+  s->gc_flags|=GCF_MMAP;
+  pushp(cx,s);
+}
+/* FEACH: path fn_addr ->  (fn: line -> cont; streamed; 0 stops early) */
+static void op_feach(Ctx*cx){
+  Cell f=pop(cx),p=pop(cx);
+  FILE* fp=fopen(uf_sptr(p),"r"); if(!fp)die("FEACH: cannot open file");
+  char* line=0; size_t ncap=0; ssize_t m;
+  while((m=getline(&line,&ncap,fp))>=0){
+    while(m>0&&(line[m-1]=='\n'||line[m-1]=='\r'))line[--m]=0;
+    Cell ls=uf_str_new(line,(size_t)m);
+    pushc(cx,ls); uf_call_addr(cx,(const void*)f.i); Cell k=pop(cx);
+    if(uf_zero(k))break;
+  }
+  free(line); fclose(fp);
+}
+/* FFOLD: path init fn_addr -> acc (fn: acc line -> acc) */
+static void op_ffold(Ctx*cx){
+  Cell f=pop(cx),acc=pop(cx),p=pop(cx);
+  FILE* fp=fopen(uf_sptr(p),"r"); if(!fp)die("FFOLD: cannot open file");
+  char* line=0; size_t ncap=0; ssize_t m;
+  while((m=getline(&line,&ncap,fp))>=0){
+    while(m>0&&(line[m-1]=='\n'||line[m-1]=='\r'))line[--m]=0;
+    Cell ls=uf_str_new(line,(size_t)m);
+    pushc(cx,acc); pushc(cx,ls); uf_call_addr(cx,(const void*)f.i); acc=pop(cx);
+  }
+  free(line); fclose(fp);
+  pushc(cx,acc);
+}
+/* FMATCH: path pat -> chan (producer thread streams matching lines, cap 64) */
+typedef struct { Ring* r; char* path; char* pat; } UfFm;
+static void* uf_fmatch_worker(void* arg){
+  UfFm* g=(UfFm*)arg;
+  FILE* fp=fopen(g->path,"r");
+  if(fp){
+    char* line=0; size_t ncap=0; ssize_t m; RxCap caps[10];
+    while((m=getline(&line,&ncap,fp))>=0){
+      while(m>0&&(line[m-1]=='\n'||line[m-1]=='\r'))line[--m]=0;
+      if(rx_exec(g->pat,line,caps)){ Cell v=uf_str_new(line,(size_t)m); ring_enq(g->r,v); }
+    }
+    free(line); fclose(fp);
+  }
+  ring_close(g->r);
+  free(g->path); free(g->pat); free(g);
+  return 0;
+}
+static void op_fmatch(Ctx*cx){
+  Cell pat=pop(cx),p=pop(cx);
+  Ring* r=uf_ring_new(64);
+  UfFm* g=(UfFm*)malloc(sizeof(UfFm)); if(!g)die("out of memory");
+  g->r=r; g->path=strdup(uf_sptr(p)); g->pat=strdup(uf_sptr(pat));
+  pthread_t th; if(pthread_create(&th,0,uf_fmatch_worker,g)){ ring_close(r); die("FMATCH: thread"); }
+  pthread_detach(th);
+  pushp(cx,r);
+}
+
+/* ================= graph traversal (visited set via dict probe loop) ================= */
+/* BFS: start fn_addr -> list (fn: node -> list of neighbors) */
+static void op_bfs(Ctx*cx){
+  Cell f=pop(cx),start=pop(cx);
+  Map* seen=uf_map_new(); UF_PROTECT(&seen);
+  Dyn* order=uf_dyn_new(8); UF_PROTECT(&order);
+  Dyn* queue=uf_dyn_new(8); UF_PROTECT(&queue);
+  map_put(seen,start,uf_mki(1));
+  uf_dyn_push(&queue,start);
+  uint64_t qi=0;
+  while(qi<queue->len){
+    Cell node=queue->data[qi++];
+    uf_dyn_push(&order,node);
+    pushc(cx,node); uf_call_addr(cx,(const void*)f.i); Cell nb=pop(cx);
+    Dyn* nbs=uf_materialize(cx,nb); UF_PROTECT(&nbs);
+    for(uint64_t i=0;i<nbs->len;i++){
+      Cell v;
+      if(!map_get(seen,nbs->data[i],&v)){ map_put(seen,nbs->data[i],uf_mki(1)); uf_dyn_push(&queue,nbs->data[i]); }
+    }
+    UF_UNPROTECT();
+  }
+  UF_UNPROTECT(); UF_UNPROTECT(); UF_UNPROTECT();
+  pushp(cx,order);
+}
+/* DFS: start fn_addr -> list (pre-order) */
+static void op_dfs(Ctx*cx){
+  Cell f=pop(cx),start=pop(cx);
+  Map* seen=uf_map_new(); UF_PROTECT(&seen);
+  Dyn* order=uf_dyn_new(8); UF_PROTECT(&order);
+  Dyn* stack=uf_dyn_new(8); UF_PROTECT(&stack);
+  uf_dyn_push(&stack,start);
+  while(stack->len){
+    Cell node=stack->data[--stack->len];
+    Cell v;
+    if(map_get(seen,node,&v))continue;
+    map_put(seen,node,uf_mki(1));
+    uf_dyn_push(&order,node);
+    pushc(cx,node); uf_call_addr(cx,(const void*)f.i); Cell nb=pop(cx);
+    Dyn* nbs=uf_materialize(cx,nb); UF_PROTECT(&nbs);
+    for(uint64_t i=nbs->len;i>0;i--) uf_dyn_push(&stack,nbs->data[i-1]);
+    UF_UNPROTECT();
+  }
+  UF_UNPROTECT(); UF_UNPROTECT(); UF_UNPROTECT();
+  pushp(cx,order);
+}
+/* WFIND: start fn_addr pred_addr -> v_or_0 (BFS, early exit) */
+static void op_wfind(Ctx*cx){
+  Cell pred=pop(cx),f=pop(cx),start=pop(cx);
+  Map* seen=uf_map_new(); UF_PROTECT(&seen);
+  Dyn* queue=uf_dyn_new(8); UF_PROTECT(&queue);
+  map_put(seen,start,uf_mki(1));
+  uf_dyn_push(&queue,start);
+  uint64_t qi=0; int found=0; Cell result=uf_mki(0);
+  while(qi<queue->len&&!found){
+    Cell node=queue->data[qi++];
+    pushc(cx,node); uf_call_addr(cx,(const void*)pred.i); Cell k=pop(cx);
+    if(!uf_zero(k)){ result=node; found=1; break; }
+    pushc(cx,node); uf_call_addr(cx,(const void*)f.i); Cell nb=pop(cx);
+    Dyn* nbs=uf_materialize(cx,nb); UF_PROTECT(&nbs);
+    for(uint64_t i=0;i<nbs->len;i++){
+      Cell v;
+      if(!map_get(seen,nbs->data[i],&v)){ map_put(seen,nbs->data[i],uf_mki(1)); uf_dyn_push(&queue,nbs->data[i]); }
+    }
+    UF_UNPROTECT();
+  }
+  UF_UNPROTECT(); UF_UNPROTECT();
+  pushc(cx,result);
+}
+
+/* ================= JSON ================= */
+typedef struct { const char* p; } JCur;
+static void j_ws(JCur* j){ while(*j->p&&isspace((unsigned char)*j->p))j->p++; }
+static Cell j_parse(JCur* j);
+static Cell j_str(JCur* j){
+  j->p++; /* opening quote */
+  size_t cap=32,n=0; char* b=(char*)uf_alloc(cap,0);
+  for(;;){
+    char c=*j->p;
+    if(!c){ free(b); die("JSON: unterminated string"); }
+    j->p++;
+    if(c=='"')break;
+    if(c=='\\'){
+      char e=*j->p++; 
+      switch(e){
+        case 'n': c='\n'; break; case 't': c='\t'; break; case 'r': c='\r'; break;
+        case 'b': c='\b'; break; case 'f': c='\f'; break; case '/': c='/'; break;
+        case '\\': c='\\'; break; case '"': c='"'; break;
+        case 'u': { /* keep the ASCII byte of \u00XX; else '?') */
+          if(j->p[0]=='0'&&j->p[1]=='0'){ char hex[3]={j->p[2],j->p[3],0}; c=(char)strtol(hex,0,16); }
+          else c='?';
+          j->p+=4; break; }
+        default: free(b); die("JSON: bad escape");
+      }
+    }
+    if(n+2>cap){ cap*=2; b=(char*)realloc(b,cap); if(!b)die("out of memory"); }
+    b[n++]=c;
+  }
+  Cell r=uf_str_new(b,n); free(b); return r;
+}
+static Cell j_parse(JCur* j){
+  j_ws(j);
+  char c=*j->p;
+  if(c=='{'){
+    j->p++; Map* m=uf_map_new(); UF_PROTECT(&m);
+    j_ws(j);
+    if(*j->p=='}'){ j->p++; UF_UNPROTECT(); return uf_mkp(m); }
+    for(;;){
+      j_ws(j); if(*j->p!='"')die("JSON: object key must be a string");
+      Cell k=j_str(j);
+      j_ws(j); if(*j->p!=':')die("JSON: expected ':'");
+      j->p++;
+      Cell v=j_parse(j);
+      map_put(m,k,v);
+      j_ws(j);
+      if(*j->p==','){ j->p++; continue; }
+      if(*j->p=='}'){ j->p++; break; }
+      die("JSON: expected ',' or '}'");
+    }
+    UF_UNPROTECT(); return uf_mkp(m);
+  }
+  if(c=='['){
+    j->p++; Dyn* d=uf_dyn_new(8); UF_PROTECT(&d);
+    j_ws(j);
+    if(*j->p==']'){ j->p++; UF_UNPROTECT(); return uf_mkp(d); }
+    for(;;){
+      Cell v=j_parse(j); uf_dyn_push(&d,v);
+      j_ws(j);
+      if(*j->p==','){ j->p++; continue; }
+      if(*j->p==']'){ j->p++; break; }
+      die("JSON: expected ',' or ']'");
+    }
+    UF_UNPROTECT(); return uf_mkp(d);
+  }
+  if(c=='"') return j_str(j);
+  if(!strncmp(j->p,"true",4)){ j->p+=4; return uf_mki(1); }
+  if(!strncmp(j->p,"false",5)){ j->p+=5; return uf_mki(0); }
+  if(!strncmp(j->p,"null",4)){ j->p+=4; return uf_mki(0); }
+  if(c=='-'||isdigit((unsigned char)c)){
+    const char* s=j->p; char* e;
+    double d=strtod(s,&e);
+    if(e==s)die("JSON: bad number");
+    int isint=1;
+    for(const char* q=s;q<e;q++) if(*q=='.'||*q=='e'||*q=='E'){isint=0;break;}
+    j->p=e;
+    if(isint){ int64_t v=strtoll(s,0,10); return uf_mki(v); }
+    return uf_mkf(d);
+  }
+  die("JSON: malformed input");
+  return uf_mki(0);
+}
+static void op_json(Ctx*cx){
+  Cell st=pop(cx);
+  JCur j={uf_sptr(st)};
+  Cell v=j_parse(&j);
+  j_ws(&j);
+  if(*j.p)die("JSON: trailing garbage");
+  pushc(cx,v);
+}
+/* UNJSON: v -> str (dict keys must be strings; atom/chan/iter/bitmap/bloom: dies) */
+static void uf_unjson_w(Cell v,char** bp,size_t* np,size_t* capp){
+#define UW(src,L) do{ size_t _l=(size_t)(L); while(*np+_l+1>*capp){ *capp*=2; *bp=(char*)realloc(*bp,*capp); if(!*bp)die("out of memory"); } memcpy(*bp+*np,(src),_l); *np+=_l; }while(0)
+  char tmp[64];
+  Hdr* a=v.tag==T_PTR&&v.i?uf_gc_find((void*)v.i):0;
+  if(a){
+    switch(a->tag){
+      case HT_STR: {
+        UW("\"",1);
+        const char* s=uf_sbytes((Str*)a);
+        for(uint64_t i=0;i<a->len;i++){ char c=s[i];
+          if(c=='"'||c=='\\'){ UW("\\",1); UW(&c,1); }
+          else if(c=='\n')UW("\\n",2);
+          else if(c=='\t')UW("\\t",2);
+          else if(c=='\r')UW("\\r",2);
+          else if((unsigned char)c<0x20){ snprintf(tmp,sizeof tmp,"\\u%04x",c); UW(tmp,6); }
+          else UW(&c,1);
+        }
+        UW("\"",1); return; }
+      case HT_DYN: {
+        Dyn* d=(Dyn*)a; UW("[",1);
+        for(uint64_t i=0;i<d->len;i++){ if(i)UW(",",1); uf_unjson_w(d->data[i],bp,np,capp); }
+        UW("]",1); return; }
+      case HT_MAP: {
+        Map* m=(Map*)a; UW("{",1); int first=1;
+        for(uint64_t i=0;i<m->cap;i++) if(m->st[i]==1){
+          if(!uf_is_str(m->keys[i]))die("UNJSON: dict keys must be strings");
+          if(!first)UW(",",1); first=0;
+          uf_unjson_w(m->keys[i],bp,np,capp); UW(":",1); uf_unjson_w(m->vals[i],bp,np,capp);
+        }
+        UW("}",1); return; }
+      case HT_ARR: case HT_TENSOR: {
+        UW("[",1);
+        for(uint64_t i=0;i<a->len;i++){ if(i)UW(",",1); uf_unjson_w(uf_cidx(v,(int64_t)i),bp,np,capp); }
+        UW("]",1); return; }
+      default: die("UNJSON: unsupported handle (atom/chan/iter/bitmap/bloom)");
+    }
+  }
+  if(v.tag==T_FLOAT){ snprintf(tmp,sizeof tmp,"%.17g",uf_f(v)); UW(tmp,strlen(tmp)); return; }
+  snprintf(tmp,sizeof tmp,"%lld",(long long)v.i); UW(tmp,strlen(tmp));
+#undef UW
+}
+static void op_unjson(Ctx*cx){
+  Cell v=pop(cx);
+  size_t cap=256,n=0; char* b=(char*)uf_alloc(cap,0);
+  uf_unjson_w(v,&b,&n,&cap);
+  Cell r=uf_str_new(b,n); free(b); pushc(cx,r);
+}
+
+/* ================= streaming sink ================= */
+/* FEMIT: it path -> n (path on top; one item per line; ints/floats decimal,
+   strings as-is, everything else unjson) */
+static void op_femit(Ctx*cx){
+  Cell p=pop(cx),h=pop(cx);
+  FILE* f=fopen(uf_sptr(p),"w"); if(!f)die("FEMIT: cannot open file");
+  Hdr* a=h.tag==T_PTR&&h.i?uf_gc_find((void*)h.i):0;
+  Iter* it = (a&&a->tag==HT_ITER) ? (Iter*)a : uf_iter_new(h);
+  UF_PROTECT(&it);
+  Cell v; int64_t n=0;
+  while(uf_iter_next(cx,it,&v)){
+    Hdr* e=v.tag==T_PTR&&v.i?uf_gc_find((void*)v.i):0;
+    if(e&&e->tag==HT_STR){ fwrite(uf_sbytes((Str*)e),1,e->len,f); }
+    else if(v.tag==T_FLOAT){ fprintf(f,"%.17g",uf_f(v)); }
+    else if(v.tag==T_INT||v.tag==T_TIME||v.tag==T_DUR){ fprintf(f,"%lld",(long long)v.i); }
+    else {
+      size_t cap=256,m=0; char* b=(char*)uf_alloc(cap,0);
+      uf_unjson_w(v,&b,&m,&cap);
+      fwrite(b,1,m,f); free(b);
+    }
+    fputc('\n',f); n++;
+  }
+  UF_UNPROTECT();
+  fclose(f);
+  pushi(cx,n);
+}
+
+/* ================= error containment ================= */
+static int uf_try_once(Ctx*cx, const void* a, Cell* out){
+  UfTry t; t.prev=uf_try_top; t.sp=cx->sp; uf_try_top=&t;
+  if(setjmp(t.jb)==0){
+    uf_call_addr(cx,a);
+    uf_try_top=t.prev;
+    Cell r = cx->sp>t.sp ? pop(cx) : uf_mki(0);
+    cx->sp=t.sp;
+    *out=r;
+    return 1;
+  }
+  uf_try_top=t.prev;
+  cx->sp=t.sp;
+  if(uf_cur_task)((WeaveTask*)uf_cur_task)->tolerated++;
+  return 0;
+}
+/* TRY: body_addr -> result ok */
+static void op_try(Ctx*cx){
+  Cell a=pop(cx); Cell r;
+  if(uf_try_once(cx,(const void*)a.i,&r)){ pushc(cx,r); pushi(cx,1); }
+  else { pushi(cx,0); pushi(cx,0); }
+}
+/* RETRY: n body_addr -> result ok (up to n+1 attempts, first success stops) */
+static void op_retry(Ctx*cx){
+  Cell a=pop(cx); int64_t n=pop(cx).i; Cell r;
+  for(int64_t k=0;;k++){
+    if(uf_try_once(cx,(const void*)a.i,&r)){
+      if(k&&uf_cur_task)((WeaveTask*)uf_cur_task)->retries+=k;
+      pushc(cx,r); pushi(cx,1); return;
+    }
+    if(k>=n){ pushi(cx,0); pushi(cx,0); return; }
+  }
+}
+
+/* ================= detached threads ================= */
+typedef struct { const void* body; Ring* r; } UfSpawn;
+static void* uf_spawn_worker(void* arg){
+  UfSpawn* g=(UfSpawn*)arg;
+  Ctx* c=ctx_new(1<<16,1<<12);
+  uf_call_addr(c,g->body);
+  Cell r = c->sp>0 ? c->ds[c->sp-1] : uf_mki(0);
+  ring_enq(g->r,r);
+  ring_close(g->r);
+  ctx_free(c);
+  free(g);
+  return 0;
+}
+/* SPAWN: body_addr -> chan (cap 1; body's top-of-stack enqueued at end,
+   then closed — deq on it is a join) */
+static void op_spawn(Ctx*cx){
+  Cell a=pop(cx);
+  Ring* r=uf_ring_new(1);
+  UfSpawn* g=(UfSpawn*)malloc(sizeof(UfSpawn)); if(!g)die("out of memory");
+  g->body=(const void*)a.i; g->r=r;
+  pthread_t th; if(pthread_create(&th,0,uf_spawn_worker,g)){ ring_close(r); die("SPAWN: thread"); }
+  pthread_detach(th);
+  pushp(cx,r);
+}
 "#;

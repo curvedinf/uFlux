@@ -670,9 +670,9 @@ FFI, chan buffers, and weave task results trivially safe).
 
 ```
 weave                      ; 𓐍 begin task scope
-  a task ... endt          ; 𓍣 𓐎 ... 𓐏 — task a, no inputs
-  b task ... endt
-  a b c task ... endt      ; task c declares inputs a, b (names before task)
+  task a ... endt          ; 𓐎𓍣 ... 𓐏 — task a, no inputs
+  task b ... endt
+  a b task c ... endt      ; task c declares inputs a, b (inputs before task, name after)
   pages 8 task fetch ... endt   ; fanout: task fetch, one input, 8 workers
 wrun                       ; 𓐐 schedule the DAG, wait, publish results
 ```

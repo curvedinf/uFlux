@@ -12,7 +12,7 @@ pub const TYPE_BASE: u32 = 0x13110;
 // glyphs (U+13110..13117). Index = opcode index in OP_NAMES.
 // Retired v9 indices (22,24,25,30,31,32,39,57..61,76,77,86,87,151,152) have
 // no glyph and no mnemonic: using them is a compile error.
-pub const CUSTOM_OPS: [(u32, usize); 173] = [
+pub const CUSTOM_OPS: [(u32, usize); 174] = [
     (0x13340, 0),  // LIT    𓍀 papyrus scroll — a written constant
     (0x13050, 1),  // DUP    𓁐 pair — duplicate
     (0x13051, 2),  // OVR    𓁑 pair variant — second copy
@@ -154,6 +154,7 @@ pub const CUSTOM_OPS: [(u32, usize); 173] = [
     (0x1341A, 148), // VMEAN
     (0x1341B, 149), // VMIN
     (0x1341C, 150), // VMAX
+    (0x1341E, 152), // DEL (protocol op; spec table gap, free slot/glyph)
     (0x1341F, 153), // VMAP
     (0x13420, 154), // VFOLD
     // ---- v10: time ----
@@ -255,7 +256,7 @@ pub const OP_NAMES: [&str; 191] = [
     // v10: vector ops
     "VADD", "VSUB", "VMUL", "VDIV", "VEADD", "VESUB", "VEMUL", "VEDIV", "VEMAX",
     "VEQ", "VLT", "VGT", "VGE", "VLE", "VAND", "VOR", "VNOT", "VCOUNT", "VGATHER",
-    "VSUM", "VMEAN", "VMIN", "VMAX", "~151", "~152", "VMAP", "VFOLD",
+    "VSUM", "VMEAN", "VMIN", "VMAX", "~151", "DEL", "VMAP", "VFOLD",
     // v10: time, bloom, script I/O
     "NOW", "TIME", "TIMEF", "BLOOM", "BADD", "BTEST", "SLURP", "SPIT", "ARGV",
     // v10: additional data ops
@@ -814,7 +815,8 @@ impl Lexer {
                             break;
                         }
                         Some(g) if ((g as u32) >= VAR_BASE && (g as u32) < VAR_BASE + 64)
-                            || ((g as u32) >= LIT_BASE && (g as u32) < LIT_BASE + 64) =>
+                            || ((g as u32) >= LIT_BASE && (g as u32) < LIT_BASE + 64)
+                            || opcode_index(g) == Some(82) =>
                         {
                             let mut runs = Vec::new();
                             let mut count: Option<i64> = None;
@@ -836,9 +838,13 @@ impl Lexer {
                             }
                             match self.peek() {
                                 Some(g) if opcode_index(g) == Some(82) => self.pos += 1,
-                                _ => self.err("WEAVE: expected TASK glyph after task name"),
+                                _ => self.err("WEAVE: expected TASK glyph after task inputs"),
                             }
-                            let name = runs.pop().unwrap_or_else(|| self.err("WEAVE: task needs a name"));
+                            self.skip_ws();
+                            let name = match self.peek() {
+                                Some(g) if (g as u32) >= VAR_BASE && (g as u32) < VAR_BASE + 64 => self.fold_slots(),
+                                _ => self.err("WEAVE: task needs a name"),
+                            };
                             let mut body = Vec::new();
                             self.lex_into(&mut body, 2);
                             out.push(Tok::Task { name, inputs: runs, count, body });
@@ -1037,7 +1043,7 @@ pub fn text_mnemonic(idx: usize) -> &'static str {
         "VEQ" => "veq", "VLT" => "vlt", "VGT" => "vgt", "VGE" => "vge", "VLE" => "vle",
         "VAND" => "vand", "VOR" => "vor", "VNOT" => "vnot", "VCOUNT" => "vcount",
         "VGATHER" => "vgather", "VSUM" => "vsum", "VMEAN" => "vmean", "VMIN" => "vmin",
-        "VMAX" => "vmax", "VMAP" => "vmap", "VFOLD" => "vfold",
+        "VMAX" => "vmax", "DEL" => "del", "VMAP" => "vmap", "VFOLD" => "vfold",
         // v10: time, bloom, script I/O
         "NOW" => "now", "TIME" => "time", "TIMEF" => "timef",
         "BLOOM" => "bloom", "BADD" => "badd", "BTEST" => "btest",
@@ -1359,9 +1365,9 @@ impl TextLexer {
                                     runs.push(t);
                                 }
                                 if self.next().as_deref() != Some("task") {
-                                    self.err("weave: expected 'task' after task name");
+                                    self.err("weave: expected 'task' after task inputs");
                                 }
-                                let name = runs.pop().unwrap_or_else(|| self.err("weave: task needs a name"));
+                                let name = self.name_token("task");
                                 let mut body = Vec::new();
                                 self.run(&mut body, 2);
                                 out.push(Tok::Task { name, inputs: runs, count, body });

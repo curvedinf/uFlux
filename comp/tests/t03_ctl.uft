@@ -1,0 +1,42 @@
+; if / ifelse
+1 'yes if
+0 'yes if
+1 'then 'els ifelse
+0 'then 'els ifelse
+jmp over
+yes: "YES\n" print ret
+then: "THEN\n" print ret
+els: "ELS\n" print ret
+over:
+; while with break/cont
+0 i!
+'i_c 'i_b while
+jmp done
+i_c: i@ 10 lt ret
+i_b:
+  i@ inc i!
+  i@ 3 eq jz skip3
+    cont
+  skip3:
+  i@ 7 eq jz skip7
+    break
+  skip7:
+  i@ "%d " print
+  ret
+done:
+"\n" print
+; for with break/cont
+3 'fbody for
+"\n" print
+jmp end
+fbody:
+  dup 1 eq jz nf1
+    drop cont
+  nf1:
+  dup 4 eq jz nf4
+    drop break
+  nf4:
+  "%d " print
+  ret
+end:
+"done\n" print

@@ -1,1 +1,0 @@
-/home/chase/Projects/uflux/comp/target/release/uf: /home/chase/Projects/uflux/comp/src/ast.rs /home/chase/Projects/uflux/comp/src/emit.rs /home/chase/Projects/uflux/comp/src/gen.rs /home/chase/Projects/uflux/comp/src/lex.rs /home/chase/Projects/uflux/comp/src/main.rs /home/chase/Projects/uflux/comp/src/parse.rs /home/chase/Projects/uflux/comp/src/prelude.rs

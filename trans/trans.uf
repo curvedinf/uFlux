@@ -132,30 +132,30 @@ pal: jmp plor
 
 plor: call pland
   plorl: call tk "||" call streq jz plord
-  call adv call pland "call lor " em jmp plorl
+  call adv call pland "call clor " em jmp plorl
 plord: ret
 
 pland: call peq
   plandl: call tk "&&" call streq jz plandd
-  call adv call peq "call land " em jmp plandl
+  call adv call peq "call cland " em jmp plandl
 plandd: ret
 
 peq: call prel
   peql: call tk "==" call streq jz peq1
-  call adv call prel "call eq " em jmp peql
+  call adv call prel "call ceq " em jmp peql
 peq1: call tk "!=" call streq jz peqd
-  call adv call prel "call ne " em jmp peql
+  call adv call prel "call cne " em jmp peql
 peqd: ret
 
 prel: call padd
   prell: call tk "<" call streq jz pr1
-  call adv call padd "call lt " em jmp prell
+  call adv call padd "call clt " em jmp prell
 pr1: call tk "<=" call streq jz pr2
-  call adv call padd "call le " em jmp prell
+  call adv call padd "call cle " em jmp prell
 pr2: call tk ">" call streq jz pr3
-  call adv call padd "call gt " em jmp prell
+  call adv call padd "call cgt " em jmp prell
 pr3: call tk ">=" call streq jz prd
-  call adv call padd "call ge " em jmp prell
+  call adv call padd "call cge " em jmp prell
 prd: ret
 
 padd: call pmul
@@ -175,7 +175,7 @@ pm2: ret
 punary: call tk "-" call streq jz pu1
   call adv "0 " em call punary "- " em ret
 pu1: call tk "!" call streq jz pu2
-  call adv call punary "call lnot " em ret
+  call adv call punary "call clnot " em ret
 pu2: call tk "~" call streq jz pu3
   call adv call punary "-1 swp - " em ret
 pu3: call tk "+" call streq jz pu4
@@ -500,9 +500,9 @@ lexd:
   "import c\"fgetc\"(ptr)->int\n" em
   "extern \"stdout\"\n" em
   "jmp main\n" em
-  "eq: je eqy\n0 ret\neqy: 1 ret\n" em
-  "ne: je nen\n1 ret\nnen: 0 ret\n" em
-  "lt: - " em
+  "ceq: je ceqy\n0 ret\nceqy: 1 ret\n" em
+  "cne: je cnen\n1 ret\ncnen: 0 ret\n" em
+  "clt: - " em
   "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em
   "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em
   "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em
@@ -511,12 +511,12 @@ lexd:
   "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em
   "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em
   "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr ret\n" em
-  "le: swp call lt 1 swp - ret\n" em
-  "gt: swp call lt ret\n" em
-  "ge: call lt 1 swp - ret\n" em
-  "lnot: jz lny\n0 ret\nlny: 1 ret\n" em
-  "nz: jz nzz\n1 ret\nnzz: 0 ret\n" em
-  "land: call nz swp call nz and ret\n" em
-  "lor: call nz swp call nz + call nz ret\n" em
+  "cle: swp call clt 1 swp - ret\n" em
+  "cgt: swp call clt ret\n" em
+  "cge: call clt 1 swp - ret\n" em
+  "clnot: jz clny\n0 ret\nclny: 1 ret\n" em
+  "cnz: jz cnzz\n1 ret\ncnzz: 0 ret\n" em
+  "cland: call cnz swp call cnz and ret\n" em
+  "clor: call cnz swp call cnz + call cnz ret\n" em
   call pprog
   0 call exit

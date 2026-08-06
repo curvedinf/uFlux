@@ -1,0 +1,5 @@
+# Rust build artifacts
+comp/target/
+
+# uflux compiler cache
+/tmp/uflux-cache/

@@ -1,0 +1,4 @@
+line one
+ERROR timeout here
+line three
+ERROR again

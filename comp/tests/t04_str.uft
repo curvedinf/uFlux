@@ -1,0 +1,22 @@
+"foo" "bar" cat "%s\n" print drop
+list 1 push 2 push list 3 push cat len "%d\n" print drop
+"hello world" 0 5 slice "%s\n" print drop
+"hello" 2 -1 slice "%s\n" print drop
+list 10 push 20 push 30 push 40 push 1 3 slice len "%d\n" print drop
+"a,b,c" "," split len "%d\n" print drop
+"a,b,c" "," split 1 get "%s\n" print drop
+list "x" push "y" push ", " join "%s\n" print drop
+"hello" "llo" find "%d\n" print drop
+"hello" "l" "L" repl "%s\n" print drop
+"  hi  " trim "%s.\n" print drop
+"abc" up "%s\n" print drop
+"ABC" down "%s\n" print drop
+"hello" "he" starts "%d\n" print drop
+"hello" "lo" ends "%d\n" print drop
+"abc123" "[0-9]+" match drop 0 get "%s\n" print drop
+"a1b2" "[0-9]" "X" replace "%s\n" print drop
+"a1b2c" "[0-9]" rsplit len "%d\n" print drop
+"file.txt" "*.txt" glob "%d\n" print drop
+"abc" "abc" eq "%d\n" print drop
+"abc" "abd" lt "%d\n" print drop
+"echo hi; echo err >&2" sh "%d\n" print drop "%s" print drop "%s" print drop

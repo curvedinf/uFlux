@@ -64,7 +64,7 @@ pub fn emit_text(toks: &[Tok]) -> String {
                 if let Some(c) = count {
                     o.push_str(&format!("{} ", c));
                 }
-                o.push_str(&format!("{} task {} endt\n  ", name, emit_text(body)));
+                o.push_str(&format!("task {} {} endt\n  ", name, emit_text(body)));
             }
             Tok::TaskEnd(_) => {}
             Tok::Wrun => {
@@ -181,7 +181,7 @@ pub fn emit_dense(toks: &[Tok]) -> String {
                         o.push_str(&lrun(*c as u64));
                         o.push(' ');
                     }
-                    o.push_str(&format!("{}{} ", nm(name, names, next), glyph_of(82)));
+                    o.push_str(&format!("{}{} ", glyph_of(82), nm(name, names, next)));
                     rec(body, names, next, weave, o);
                     o.push_str(&format!("{}\n", glyph_of(83)));
                 }

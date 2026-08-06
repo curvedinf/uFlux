@@ -1,20 +1,20 @@
 ; weave.uf — v10: two slow independent tasks + dependent combine
 ; wall time should be ~= max(task times), not their sum
 𓐍
-𓍣 𓐎 𓎤𓍫!
+𓐎𓍣 𓎤𓍫!
 𓍶
 𓍫@𓎥𓏃𓎻𓏅𓎤-𓂼𓍷
 𓍫@𓂥𓍫!
 𓂻𓍶
 𓍷
 𓏌𓐏
-𓍤 𓐎 𓎤𓍬!
+𓐎𓍤 𓎤𓍬!
 𓍶
 𓍬@𓎥𓏃𓎻𓏅𓎤-𓂼𓍷
 𓍬@𓂥𓍬!
 𓂻𓍶
 𓍷
 𓎦𓐏
-𓍣 𓍤 𓍥 𓐎 +𓐏
+𓍣 𓍤 𓐎𓍥 +𓐏
 𓐐
 𓍥@"result=%d\n"𓂎"42 expected\n"𓂎𓂹

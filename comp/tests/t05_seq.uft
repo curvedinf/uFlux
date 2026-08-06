@@ -1,0 +1,28 @@
+; range/sort/filter/some/every
+0 5 range len "%d\n" print drop
+0 5 range 3 get "%d\n" print drop
+list 3 push 1 push 2 push sort 0 get "%d\n" print drop
+0 10 range 'even filter len "%d\n" print drop
+0 10 range 'big some "%d\n" print drop
+0 10 range 'big every "%d\n" print drop
+jmp over
+even: 2 rem 0 eq ret
+big: 5 gt ret
+over:
+; orelse
+0 42 orelse "%d\n" print drop
+7 42 orelse "%d\n" print drop
+; group/agg/unique/flat/chunk
+0 10 range 'pmod group g!
+g@ 0 get len "%d\n" print drop
+g@ 'gsum agg a!
+a@ 1 get "%d\n" print drop
+jmp over2
+pmod: 3 rem ret
+gsum: lst! lst@ len n! n@ arr int a! n@ 'cp for a@ vsum ret
+cp: k! lst@ k@ get a@ swp k@ swp set ret
+over2:
+list 1 push 2 push 2 push 3 push 1 push unique len "%d\n" print drop
+list list 1 push 2 push push list 3 push push 4 push flat len "%d\n" print drop
+0 7 range 3 chunk len "%d\n" print drop
+0 7 range 3 chunk 2 get len "%d\n" print drop
