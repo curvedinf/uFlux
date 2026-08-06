@@ -6,31 +6,31 @@ ws@ len n!
 0 i!
 wloop:
   i@ n@ - jz wdone
-  ws@ i@ idx w!
-  d@ w@ dget jz miss
+  ws@ i@ get w!
+  d@ w@ getq dup jz miss
   1 + nv! jmp put
 miss:
   drop 1 nv!
 put:
-  d@ w@ nv@ dput
+  d@ w@ nv@ set
   i@ 1 + i!
   jmp wloop
 wdone:
-d@ dcount "unique=%d\n" print drop
-d@ "the" dget drop "the=%d\n" print drop
-d@ "cat" dget drop "cat=%d\n" print drop
-; RX: capture-group extraction
-"user=alice id=42" "user=([a-z]+) id=([0-9]+)" rx jz rxfail
-dup 1 idx "name=%s\n" print drop
-2 idx "id=%s\n" print drop
+d@ len "unique=%d\n" print drop
+d@ "the" getq "the=%d\n" print drop
+d@ "cat" getq "cat=%d\n" print drop
+; MATCH: capture-group extraction
+"user=alice id=42" "user=([a-z]+) id=([0-9]+)" match jz rxfail
+dup 1 get "name=%s\n" print drop
+2 get "id=%s\n" print drop
 jmp rxdone
 rxfail:
-  "rx failed\n" print drop
+  "match failed\n" print drop
 rxdone:
-; RXSUB: backref word swap
-"hello world" "(h)([a-z]+) (w)([a-z]+)" "\\3\\4 \\1\\2" rxsub "swap=%s\n" print drop
-; RXSPLIT: split on runs of digits
-"a1b22c333d" "[0-9]+" rxsplit "|" join "rxsplit=%s\n" print drop
+; REPLACE: backref word swap
+"hello world" "(h)([a-z]+) (w)([a-z]+)" "\\3\\4 \\1\\2" replace "swap=%s\n" print drop
+; RSPLIT: split on runs of digits
+"a1b22c333d" "[0-9]+" rsplit "|" join "rsplit=%s\n" print drop
 ; SLICE: negative indices and clamping
 "abcdef" -3 6 slice "slice1=%s\n" print drop
 "abcdef" 2 -1 slice "slice2=%s\n" print drop

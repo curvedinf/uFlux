@@ -1,4 +1,4 @@
-; weave.uf — v9: two slow independent tasks + dependent combine
+; weave.uf — v10: two slow independent tasks + dependent combine
 ; wall time should be ~= max(task times), not their sum
 𓐍
 𓍣 𓐎 𓎤𓍫!

@@ -1,8 +1,8 @@
 # trans — C → µFlux transpiler, written in µFlux
 
 `trans.uf` is the first real program written in µFlux itself: a regex-based
-lexer (the `rx` op) plus a hand-rolled recursive-descent parser that reads a
-C source file and prints **v9 text-encoding** µFlux source (per
+lexer (the `match` op) plus a hand-rolled recursive-descent parser that reads a
+C source file and prints **v10 text-encoding** µFlux source (per
 `../SPEC.md`) to stdout.
 
 ## Usage
@@ -63,11 +63,11 @@ live in `tests/` (see `tests/README.md`).
 
 ## Internals
 
-- Lexer: each token class is matched by the µFlux `rx` regex op; tokens are
+- Lexer: each token class is matched by the µFlux `match` regex op; tokens are
   kept in a list (`toks`) of typed records and indexed by position (`pi`).
 - Parser: single-pass, emits µFlux text as it parses — expressions map
   directly onto the stack machine. Every C variable gets a unique global
-  slot `v0, v1, ...` (tracked in a `vars` dict via `dget`/`dput`).
+  slot `v0, v1, ...` (tracked in a `vars` dict via `getq`/`set`).
 - Control flow uses numbered `L<n>` labels with `jz`/`jmp`. A list stack
   (`ps`) plus `brks`/`cnts` label lists keep nested loop/if state safe
   across recursive parser calls (named variables are global slots, so parser
