@@ -34,7 +34,7 @@ typedef struct { int tag; int64_t i; } Cell;
    allocation list; gc_flags holds the mark bit, pin bit, mmap bit and the
    allocation sequence (objects younger than a collection's start are never
    swept, which closes the alloc-then-publish race window). */
-#define UFHDR void* gc_next; uint64_t gc_flags; uint64_t tag; uint64_t len; uint64_t esz; uint64_t ety
+#define UFHDR void* gc_next; void* gc_parent; uint64_t gc_flags; uint64_t tag; uint64_t len; uint64_t esz; uint64_t ety
 #define GCF_MARK 1
 #define GCF_PINNED 2
 #define GCF_MMAP 4
@@ -57,12 +57,12 @@ typedef struct { const void* end; const void* cont; long cspl; } UfLoop;
 typedef struct CtxS { Cell* ds; long sp; long dcap; const void** cs; long csp; long ccap; UfLoop loops[64]; long lsp; struct CtxS* gc_prev; } Ctx;
 
 static void uflux_run(Ctx*cx, long pc);
-static _Thread_local const void* uf_entry_addr; /* pc<0 entry convention: goto *uf_entry_addr */
+static _Thread_local const void* uf_entry_addr;
 static void uf_call_addr(Ctx*cx, const void* a){ cx->cs[cx->csp++]=0; uf_entry_addr=a; uflux_run(cx,-1); }
 
 /* ---- error containment (try/retry): die unwinds to the nearest setjmp
    checkpoint; with no checkpoint die is fatal, as before ---- */
-typedef struct UfTry { jmp_buf jb; struct UfTry* prev; long sp; } UfTry;
+typedef struct UfTry { jmp_buf jb; struct UfTry* prev; long sp; long csp; } UfTry;
 static _Thread_local UfTry* uf_try_top = 0;
 static _Thread_local void* uf_cur_task; /* WeaveTask* for debug counters */
 static void die(const char*m){
@@ -70,21 +70,25 @@ static void die(const char*m){
   fprintf(stderr,"uflux: %s\n",m); exit(1);
 }
 
-/* ================= garbage collector: precise, non-moving, stop-the-world
-   mark-sweep. Roots: every registered Ctx's data stack, all variables,
-   active weave results, chan contents (scanned as object bodies), and the
-   builder tmp-root stack. Untagged malloc/buf pointers are never traced. */
-static void* uf_gc_list;
+/* ================= garbage collector: malloc-based mark-sweep with hash set.
+   Every allocation goes through malloc + linked list + address hash set.
+   In single-threaded mode (default) no mutex is needed; when threads are
+   spawned uf_gc_mt is set to 1 and the mutex is taken on the alloc path. */
+static void* uf_gc_list; /* linked list of all allocations */
 static _Atomic uint64_t uf_gc_seq = 1;
+static _Atomic int uf_gc_mt = 0; /* set to 1 when threads are spawned */
 static uint64_t uf_gc_bytes_since, uf_gc_threshold = 1<<20, uf_gc_live;
 static int uf_gc_on = 1;
 static pthread_mutex_t uf_gc_mu = PTHREAD_MUTEX_INITIALIZER;
-/* address hash set of live objects (open addressing, powers of two) */
+/* address hash set for all allocated objects */
 static void** uf_gc_set; static uint64_t uf_gc_setcap, uf_gc_setlen;
+/* context registry: every Ctx's data stack is a precise root set */
+#define UF_MAXCTX 512
+static Ctx* uf_ctxs[UF_MAXCTX]; static _Atomic int uf_nctxs;
 static void uf_gc_set_insert(void* p);
 static void uf_gc_set_grow(void){
   uint64_t oc=uf_gc_setcap; void** os=uf_gc_set;
-  uf_gc_setcap = oc? oc*2 : 1024; uf_gc_setlen = 0;
+  uf_gc_setcap = oc? oc*2 : 256; uf_gc_setlen = 0;
   uf_gc_set = (void**)calloc(uf_gc_setcap, sizeof(void*)); if(!uf_gc_set)die("out of memory");
   for(uint64_t i=0;i<oc;i++) if(os[i]&&os[i]!=(void*)1) uf_gc_set_insert(os[i]);
   free(os);
@@ -95,11 +99,7 @@ static void uf_gc_set_insert(void* p){
   while(uf_gc_set[i] && uf_gc_set[i]!=p) i=(i+1)%uf_gc_setcap;
   if(!uf_gc_set[i]){ uf_gc_set[i]=p; uf_gc_setlen++; }
 }
-static void uf_gc_set_remove(void* p){
-  if(!uf_gc_setcap) return;
-  uint64_t i = ((uint64_t)p >> 4) * 11400714819323198485ULL >> 32; i %= uf_gc_setcap;
-  while(uf_gc_set[i]){ if(uf_gc_set[i]==p){ uf_gc_set[i]=(void*)1; uf_gc_setlen--; return; } i=(i+1)%uf_gc_setcap; }
-}
+static Ctx main_cx_store; /* fwd: defined fully below */
 static Hdr* uf_gc_find(void* p){
   if(!p || !uf_gc_setcap || p==(void*)1) return 0;
   uint64_t i = ((uint64_t)p >> 4) * 11400714819323198485ULL >> 32; i %= uf_gc_setcap;
@@ -107,8 +107,6 @@ static Hdr* uf_gc_find(void* p){
   return 0;
 }
 /* context registry: every Ctx's data stack is a precise root set */
-#define UF_MAXCTX 512
-static Ctx* uf_ctxs[UF_MAXCTX]; static _Atomic int uf_nctxs;
 static void ctx_register(Ctx*c){ pthread_mutex_lock(&uf_gc_mu); int i=uf_nctxs; if(i<UF_MAXCTX){ uf_ctxs[i]=c; uf_nctxs=i+1; } pthread_mutex_unlock(&uf_gc_mu); }
 static void ctx_unregister(Ctx*c){ pthread_mutex_lock(&uf_gc_mu); for(int i=0;i<uf_nctxs;i++) if(uf_ctxs[i]==c){ uf_ctxs[i]=uf_ctxs[uf_nctxs-1]; uf_nctxs--; break; } pthread_mutex_unlock(&uf_gc_mu); }
 /* variable roots, registered by generated code */
@@ -129,6 +127,7 @@ static void uf_mark_cell(Cell c){ if(c.tag==T_PTR && c.i) uf_mark_ptr((void*)c.i
 static void uf_mark_obj(Hdr* h){
   if(h->gc_flags & GCF_MARK) return;
   h->gc_flags |= GCF_MARK;
+  if(h->gc_parent) uf_mark_ptr(h->gc_parent);
   switch(h->tag){
     case HT_DYN: { Dyn* d=(Dyn*)h; for(uint64_t i=0;i<d->len;i++) uf_mark_cell(d->data[i]); break; }
     case HT_MAP: { Map* m=(Map*)h; for(uint64_t i=0;i<m->cap;i++) if(m->st[i]==1){ uf_mark_cell(m->keys[i]); uf_mark_cell(m->vals[i]); } break; }
@@ -140,12 +139,11 @@ static void uf_mark_obj(Hdr* h){
 }
 struct WeaveJobS; static struct WeaveJobS* uf_active_job;
 static void uf_weave_mark(struct WeaveJobS* j);
-static Ctx main_cx_store; /* defined below */
 static void uf_gc_free_obj(Hdr* h){
   switch(h->tag){
     case HT_MAP: { Map* m=(Map*)h; free(m->keys); free(m->vals); free(m->st); break; }
     case HT_RING: { Ring* r=(Ring*)h; pthread_mutex_destroy(&r->mu); pthread_cond_destroy(&r->notfull); pthread_cond_destroy(&r->notempty); free(r->buf); break; }
-    case HT_STR: { Str* s=(Str*)h; if(s->mlen) munmap((void*)s->mdata,(size_t)s->mlen); break; }
+    case HT_STR: { Str* s=(Str*)h; if(s->mlen) munmap((void*)s->mdata,(size_t)s->mlen); else if(s->gc_parent==(void*)1) free((void*)s->mdata); break; }
     default: break;
   }
   free(h);
@@ -153,45 +151,45 @@ static void uf_gc_free_obj(Hdr* h){
 static void uf_gc_collect(void){
   pthread_mutex_lock(&uf_gc_mu);
   uint64_t start_seq = uf_gc_seq;
+  /* mark all roots */
   for(long i=0;i<uf_nvar_roots;i++) uf_mark_cell(*uf_var_roots[i]);
   int nc = uf_nctxs;
   for(int i=0;i<nc;i++){ Ctx* c=uf_ctxs[i]; for(long s=0;s<c->sp;s++) uf_mark_cell(c->ds[s]); }
   int nt = uf_ntmp; if(nt>UF_MAXTMP)nt=UF_MAXTMP;
   for(int i=0;i<nt;i++){ void** pp=uf_tmp_roots[i]; if(pp&&*pp) uf_mark_ptr(*pp); }
   if(uf_active_job) uf_weave_mark(uf_active_job);
-  void** pp = &uf_gc_list; uint64_t live=0;
+  /* sweep gc_list: free unmarked, unpinned objects with seq < start_seq */
+  void** pp = &uf_gc_list;
   while(*pp){
     Hdr* h=(Hdr*)*pp;
-    if(!(h->gc_flags&GCF_MARK) && !(h->gc_flags&GCF_PINNED) && ((h->gc_flags>>GCF_SEQSHIFT) < start_seq)){
+    if(!(h->gc_flags&GCF_PINNED) && !(h->gc_flags&GCF_MARK) && ((h->gc_flags>>GCF_SEQSHIFT) < start_seq)){
       *pp = h->gc_next; uf_gc_free_obj(h);
     } else {
-      h->gc_flags &= ~(uint64_t)GCF_MARK; pp = &h->gc_next; live++;
+      h->gc_flags &= ~(uint64_t)GCF_MARK; pp = &h->gc_next;
     }
   }
-  /* rebuild set from scratch (live objects only) to clear tombstones */
-  if(uf_gc_set){ free(uf_gc_set); }
-  uf_gc_setcap = live*2+16; if(uf_gc_setcap<1024)uf_gc_setcap=1024;
-  uf_gc_set = (void**)calloc(uf_gc_setcap, sizeof(void*)); if(!uf_gc_set)die("out of memory");
+  /* rebuild hash set from live objects (eliminates tombstones from freed slots) */
   uf_gc_setlen = 0;
-  for(void*p=uf_gc_list;p;p=((Hdr*)p)->gc_next) uf_gc_set_insert(p);
-  uf_gc_live = live; uf_gc_bytes_since = 0;
-  uint64_t t2 = uf_gc_live*256;
-  uf_gc_threshold = (1<<20) > t2 ? (1<<20) : t2;
+  if(uf_gc_set) memset(uf_gc_set, 0, uf_gc_setcap * sizeof(void*));
+  { void* q = uf_gc_list;
+    while(q){ uf_gc_set_insert(q); q = ((Hdr*)q)->gc_next; }
+  }
+  uf_gc_bytes_since = 0;
   pthread_mutex_unlock(&uf_gc_mu);
 }
 static void* uf_gc_alloc(size_t sz, int align){
+  sz = sz ? sz : 1;
   if(uf_gc_on && uf_gc_bytes_since + sz > uf_gc_threshold) uf_gc_collect();
   void* p = NULL;
-  if(align>0){ if(posix_memalign(&p,(size_t)align,sz?sz:1))die("alloc failed"); }
-  else { p=malloc(sz?sz:1); }
+  if(align>0){ if(posix_memalign(&p,(size_t)align,sz))die("alloc failed"); }
+  else { p=malloc(sz); }
   if(!p)die("out of memory");
-  memset(p,0,sz?sz:1);
-  pthread_mutex_lock(&uf_gc_mu);
-  Hdr* h=(Hdr*)p; h->gc_next=uf_gc_list; uf_gc_list=p;
+  memset(p,0,sz);
+  Hdr* h=(Hdr*)p; 
   h->gc_flags = ((uint64_t)atomic_fetch_add(&uf_gc_seq,1))<<GCF_SEQSHIFT;
   uf_gc_bytes_since += sz;
-  uf_gc_set_insert(p);
-  pthread_mutex_unlock(&uf_gc_mu);
+  if(atomic_load(&uf_gc_mt)){ pthread_mutex_lock(&uf_gc_mu); h->gc_next=uf_gc_list; uf_gc_list=p; uf_gc_set_insert(p); pthread_mutex_unlock(&uf_gc_mu); }
+  else { h->gc_next=uf_gc_list; uf_gc_list=p; uf_gc_set_insert(p); }
   return p;
 }
 /* register a static object (string literal): linked, pinned, never swept */
@@ -211,7 +209,7 @@ static void uf_gc_init(void){
 }
 static void op_gc(Ctx*cx){ (void)cx; uf_gc_collect(); }
 
-static Ctx* ctx_new(long dcap,long ccap){ Ctx*c=(Ctx*)calloc(1,sizeof(Ctx)); if(!c)die("out of memory"); c->ds=(Cell*)malloc(dcap*sizeof(Cell)); c->cs=(const void**)malloc(ccap*sizeof(void*)); if(!c->ds||!c->cs)die("out of memory"); c->dcap=dcap; c->ccap=ccap; ctx_register(c); return c; }
+static Ctx* ctx_new(long dcap,long ccap){ Ctx*c=(Ctx*)calloc(1,sizeof(Ctx)); if(!c)die("out of memory"); c->ds=(Cell*)malloc(dcap*sizeof(Cell)); c->cs=(const void**)malloc(ccap*sizeof(void*)); if(!c->ds||!c->cs)die("out of memory"); c->dcap=dcap; c->ccap=ccap; atomic_store(&uf_gc_mt,1); ctx_register(c); return c; }
 static void ctx_free(Ctx*c){ ctx_unregister(c); free(c->ds); free((void*)c->cs); free(c); }
 static Cell main_ds[1<<20]; static const void* main_cs[1<<16];
 static Ctx main_cx_store = { main_ds, 0, 1<<20, main_cs, 0, 1<<16, {{0,0,0}}, 0, 0 };
@@ -221,26 +219,29 @@ int64_t uf_argc=0; void* uf_argv=0; /* program args, reachable via EXTERN "uf_ar
 static void pushc(Ctx*cx,Cell c){ if(cx->sp>=cx->dcap)die("stack overflow"); cx->ds[cx->sp++]=c; }
 static inline Cell uf_mki(int64_t v){ Cell c; c.tag=T_INT; c.i=v; return c; }
 static inline Cell uf_mkp(void* v){ Cell c; c.tag=T_PTR; c.i=(int64_t)v; return c; }
+static int uf_is_str(Cell c); /* fwd decl for coercion */
+static const char* uf_sptr(Cell c); /* fwd decl */
 static inline double uf_fbits(int64_t i){ union{int64_t i;double f;}u;u.i=i;return u.f; }
 static inline int64_t uf_ibits(double f){ union{int64_t i;double f;}u;u.f=f;return u.i; }
-static inline double uf_f(Cell c){ return c.tag==T_FLOAT?uf_fbits(c.i):(double)c.i; }
+static inline double uf_f(Cell c){ if(c.tag==T_FLOAT)return uf_fbits(c.i); if(c.tag==T_PTR&&c.i&&uf_is_str(c)) return strtod(uf_sptr(c),0); return (double)c.i; }
+static inline int64_t uf_i(Cell c){ if(c.tag==T_PTR&&c.i&&uf_is_str(c)) return strtoll(uf_sptr(c),0,10); return c.i; }
 static inline Cell uf_mkf(double v){ Cell c; c.tag=T_FLOAT; c.i=uf_ibits(v); return c; }
 static inline Cell uf_fromf(double v){ return uf_mkf(v); }
 static inline int uf_zero(Cell c){ return c.tag==T_FLOAT?(int64_t)uf_fbits(c.i)==0:c.i==0; }
-static inline Cell uf_cadd(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT)return uf_fromf(uf_f(a)+uf_f(b)); return uf_mki(a.i+b.i); }
-static inline Cell uf_csub(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT)return uf_fromf(uf_f(a)-uf_f(b)); return uf_mki(a.i-b.i); }
-static inline Cell uf_cmul(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT)return uf_fromf(uf_f(a)*uf_f(b)); return uf_mki(a.i*b.i); }
-static inline Cell uf_cand(Cell a,Cell b){ return uf_mki(a.i&b.i); }
-static inline Cell uf_cshr(Cell a){ return uf_mki((int64_t)((uint64_t)a.i>>1)); }
-static inline Cell uf_cinc(Cell a){ if(a.tag==T_FLOAT)return uf_fromf(uf_f(a)+1.0); return uf_mki(a.i+1); }
-static inline Cell uf_cdec(Cell a){ if(a.tag==T_FLOAT)return uf_fromf(uf_f(a)-1.0); return uf_mki(a.i-1); }
-static inline int uf_ceq(Cell a,Cell b){ return (a.tag==T_FLOAT||b.tag==T_FLOAT)?uf_f(a)==uf_f(b):a.i==b.i; }
+static inline Cell uf_cadd(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT)return uf_fromf(uf_f(a)+uf_f(b)); return uf_mki(uf_i(a)+uf_i(b)); }
+static inline Cell uf_csub(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT)return uf_fromf(uf_f(a)-uf_f(b)); return uf_mki(uf_i(a)-uf_i(b)); }
+static inline Cell uf_cmul(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT)return uf_fromf(uf_f(a)*uf_f(b)); return uf_mki(uf_i(a)*uf_i(b)); }
+static inline Cell uf_cand(Cell a,Cell b){ return uf_mki(uf_i(a)&uf_i(b)); }
+static inline Cell uf_cshr(Cell a){ return uf_mki((int64_t)((uint64_t)uf_i(a)>>1)); }
+static inline Cell uf_cinc(Cell a){ if(a.tag==T_FLOAT)return uf_fromf(uf_f(a)+1.0); return uf_mki(uf_i(a)+1); }
+static inline Cell uf_cdec(Cell a){ if(a.tag==T_FLOAT)return uf_fromf(uf_f(a)-1.0); return uf_mki(uf_i(a)-1); }
+static inline int uf_ceq(Cell a,Cell b){ return (a.tag==T_FLOAT||b.tag==T_FLOAT)?uf_f(a)==uf_f(b):uf_i(a)==uf_i(b); }
 
 /* ---- string access: every core string is a tag-9 Str object; raw char*
    from IMPORTed C functions is still accepted (legacy ptr) ---- */
 static int uf_is_str(Cell c){ if(c.tag!=T_PTR||!c.i)return 0; Hdr*h=uf_gc_find((void*)c.i); return h&&h->tag==HT_STR; }
-static const char* uf_sbytes(Str*s){ return s->mlen?s->mdata:s->data; }
-static const char* uf_sptr(Cell c){ if(c.tag==T_PTR&&c.i){ Hdr*h=uf_gc_find((void*)c.i); if(h&&h->tag==HT_STR){ Str*s=(Str*)h; return s->mlen?s->mdata:s->data; } if(h&&h->tag==HT_BUF){ return h->data; } } if(c.tag==T_INT&&c.i>(int64_t)65536) return (const char*)c.i; /* FFI raw char* */ if(c.tag==T_INT&&!c.i) return (const char*)0; die("expected string, got non-pointer cell"); }
+static const char* uf_sbytes(Str*s){ return (s->mlen||s->gc_parent)?s->mdata:s->data; }
+static const char* uf_sptr(Cell c){ if(c.tag==T_PTR&&c.i){ Hdr*h=uf_gc_find((void*)c.i); if(h&&h->tag==HT_STR){ Str*s=(Str*)h; return (s->mlen||s->gc_parent)?s->mdata:s->data; } if(h&&h->tag==HT_BUF){ return h->data; } return (const char*)c.i; /* raw ptr from malloc/FFI */ } if(c.tag==T_INT&&c.i>(int64_t)65536) return (const char*)c.i; if(c.tag==T_INT&&!c.i) return (const char*)0; die("expected string, got non-pointer cell"); }
 static int64_t uf_slen(Cell c){ if(c.tag==T_PTR&&c.i){ Hdr*h=uf_gc_find((void*)c.i); if(h&&h->tag==HT_STR)return (int64_t)h->len; } return (int64_t)strlen((const char*)c.i); }
 static Cell uf_str_new(const char* s, size_t n){
   Str* r=(Str*)uf_gc_alloc(sizeof(Str)+n+1,0);
@@ -274,8 +275,8 @@ static void op_inc(Ctx*cx){ pushc(cx,uf_cinc(pop(cx))); }
 static void op_dec(Ctx*cx){ pushc(cx,uf_cdec(pop(cx))); }
 
 /* v10 arithmetic & logic */
-static void op_div(Ctx*cx){ Cell b=pop(cx),a=pop(cx); if(a.tag==T_FLOAT||b.tag==T_FLOAT){ double d=uf_f(b); if(d==0.0)die("DIV: division by zero"); pushf(cx,uf_f(a)/d); } else { if(b.i==0)die("DIV: division by zero"); pushi(cx,a.i/b.i); } }
-static void op_rem(Ctx*cx){ Cell b=pop(cx),a=pop(cx); if(a.tag==T_FLOAT||b.tag==T_FLOAT){ double d=uf_f(b); if(d==0.0)die("REM: division by zero"); pushf(cx,fmod(uf_f(a),d)); } else { if(b.i==0)die("REM: division by zero"); pushi(cx,a.i%b.i); } }
+static void op_div(Ctx*cx){ Cell b=pop(cx),a=pop(cx); if(a.tag==T_FLOAT||b.tag==T_FLOAT){ double d=uf_f(b); if(d==0.0)die("DIV: division by zero"); pushf(cx,uf_f(a)/d); } else { int64_t bv=uf_i(b); if(bv==0)die("DIV: division by zero"); pushi(cx,uf_i(a)/bv); } }
+static void op_rem(Ctx*cx){ Cell b=pop(cx),a=pop(cx); if(a.tag==T_FLOAT||b.tag==T_FLOAT){ double d=uf_f(b); if(d==0.0)die("REM: division by zero"); pushf(cx,fmod(uf_f(a),d)); } else { int64_t bv=uf_i(b); if(bv==0)die("REM: division by zero"); pushi(cx,uf_i(a)%bv); } }
 static void op_eq(Ctx*cx){
   Cell b=pop(cx),a=pop(cx); int r;
   if(a.tag==T_FLOAT||b.tag==T_FLOAT){ if((a.tag==T_INT||a.tag==T_FLOAT)&&(b.tag==T_INT||b.tag==T_FLOAT)) r=(uf_f(a)==uf_f(b)); else r=(a.i==b.i&&a.tag==b.tag); }
@@ -1199,21 +1200,38 @@ static void op_glob(Ctx*cx){
   pushi(cx,fnmatch(uf_sptr(pat),uf_sptr(st),0)==0?1:0);
 #endif
 }
-/* SPLIT: str sep -> list (literal separator) */
+/* SPLIT: str sep -> list (true zero-copy: NUL-terminate fields in-place) */
 static void op_split(Ctx*cx){
   Cell sep=pop(cx),st=pop(cx);
-  const char* S=uf_sptr(st); const char* E=uf_sptr(sep);
+  /* get mutable pointer — parent must be a GC Str with inline/mmap data */
+  Hdr* parent = uf_gc_find((void*)st.i);
+  char* S;
+  if(parent && parent->tag==HT_STR){
+    Str* sp=(Str*)parent;
+    S = (sp->mlen || sp->gc_parent) ? (char*)sp->mdata : sp->data;
+  } else {
+    S = (char*)uf_sptr(st); /* legacy raw char* */
+  }
+  const char* E=uf_sptr(sep);
   if(!*E)die("SPLIT: empty separator");
   size_t el=strlen(E);
   Dyn*d=uf_dyn_new(8); UF_PROTECT(&d);
-  const char* cur=S;
+  char* cur=S;
   for(;;){
-    const char* m=strstr(cur,E);
+    char* m=strstr(cur,E);
     if(!m)break;
-    uf_dyn_push_str(&d,cur,(size_t)(m-cur));
+    *m=0; /* NUL-terminate the field in-place */
+    Str* v=(Str*)uf_gc_alloc(sizeof(Str),0);
+    v->tag=HT_STR; v->esz=1; v->len=(size_t)(m-cur); v->mlen=0;
+    v->mdata=cur; v->gc_parent=parent; /* view: keep parent alive, own nothing */
+    uf_dyn_push(&d,uf_mkp(v));
     cur=m+el;
   }
-  uf_dyn_push_str(&d,cur,strlen(cur));
+  size_t flen=strlen(cur);
+  Str* v=(Str*)uf_gc_alloc(sizeof(Str),0);
+  v->tag=HT_STR; v->esz=1; v->len=flen; v->mlen=0;
+  v->mdata=cur; v->gc_parent=parent;
+  uf_dyn_push(&d,uf_mkp(v));
   UF_UNPROTECT();
   pushp(cx,d);
 }
@@ -1273,6 +1291,12 @@ static void op_down(Ctx*cx){ Cell st=pop(cx); const char*s=uf_sptr(st); size_t n
 /* STARTS/ENDS: str affix -> 0/1 */
 static void op_starts(Ctx*cx){ Cell af=pop(cx),st=pop(cx); const char*s=uf_sptr(st); const char*a=uf_sptr(af); pushi(cx,strncmp(s,a,strlen(a))==0?1:0); }
 static void op_ends(Ctx*cx){ Cell af=pop(cx),st=pop(cx); const char*s=uf_sptr(st); const char*a=uf_sptr(af); size_t ls=strlen(s),la=strlen(a); pushi(cx,(la<=ls&&strcmp(s+ls-la,a)==0)?1:0); }
+
+/* ATOI/ATOF/ITOA/FTOA: explicit string<->number conversion */
+static void op_atoi(Ctx*cx){ Cell s=pop(cx); pushi(cx,(int64_t)strtoll(uf_sptr(s),0,10)); }
+static void op_atof(Ctx*cx){ Cell s=pop(cx); pushf(cx,strtod(uf_sptr(s),0)); }
+static void op_itoa(Ctx*cx){ Cell n=pop(cx); char b[32]; snprintf(b,sizeof(b),"%lld",(long long)uf_i(n)); pushc(cx,uf_str_new(b,strlen(b))); }
+static void op_ftoa(Ctx*cx){ Cell n=pop(cx); char b[32]; snprintf(b,sizeof(b),"%g",uf_f(n)); pushc(cx,uf_str_new(b,strlen(b))); }
 
 /* ================= sequences: sort/filter/some/every ================= */
 /* stable mergesort of a cell array with uf_cmp order; dies on incomparable */
@@ -1932,7 +1956,7 @@ static void op_femit(Ctx*cx){
 
 /* ================= error containment ================= */
 static int uf_try_once(Ctx*cx, const void* a, Cell* out){
-  UfTry t; t.prev=uf_try_top; t.sp=cx->sp; uf_try_top=&t;
+  UfTry t; t.prev=uf_try_top; t.sp=cx->sp; t.csp=cx->csp; uf_try_top=&t;
   if(setjmp(t.jb)==0){
     uf_call_addr(cx,a);
     uf_try_top=t.prev;
@@ -1943,6 +1967,7 @@ static int uf_try_once(Ctx*cx, const void* a, Cell* out){
   }
   uf_try_top=t.prev;
   cx->sp=t.sp;
+  cx->csp=t.csp;
   if(uf_cur_task)((WeaveTask*)uf_cur_task)->tolerated++;
   return 0;
 }
@@ -1987,5 +2012,13 @@ static void op_spawn(Ctx*cx){
   pthread_t th; if(pthread_create(&th,0,uf_spawn_worker,g)){ ring_close(r); die("SPAWN: thread"); }
   pthread_detach(th);
   pushp(cx,r);
+}
+/* init-TU worker: fire-and-forget thread for init.uf entry points.
+   Same as uf_spawn_worker minus the chan — process exit kills these. */
+static void* uf_init_worker(void* arg){
+  Ctx* c=ctx_new(1<<16,1<<12);
+  uf_call_addr(c,arg);
+  ctx_free(c);
+  return 0;
 }
 "#;

@@ -58,8 +58,9 @@ live in `tests/` (see `tests/README.md`).
 - **No recursion with parameters/locals**: µFlux variable slots are global,
   so a recursive call clobbers the caller's variables. Recursion in leaf
   functions without locals works.
-- `&&`/`||` do not short-circuit: both sides are evaluated (the `land`/`lor`
-  helpers are stack ops). Guard out-of-bounds dereferences with nested `if`s.
+- `&&`/`||` do not short-circuit: both sides are evaluated (normalized via
+  `not not` then combined with `and`/`or`). Guard out-of-bounds dereferences
+  with nested `if`s.
 
 ## Internals
 
@@ -68,20 +69,28 @@ live in `tests/` (see `tests/README.md`).
 - Parser: single-pass, emits µFlux text as it parses — expressions map
   directly onto the stack machine. Every C variable gets a unique global
   slot `v0, v1, ...` (tracked in a `vars` dict via `getq`/`set`).
-- Control flow uses numbered `L<n>` labels with `jz`/`jmp`. A list stack
-  (`ps`) plus `brks`/`cnts` label lists keep nested loop/if state safe
-  across recursive parser calls (named variables are global slots, so parser
-  temps must live on the data stack or in `ps`).
+- Control flow emits v10 structured opcodes: `if`/`ifelse`/`while` with
+  quotation labels (`'_iN`, `'_cN`, `'_bN`). Each C `if`/`while`/`for`/`do`
+  generates condition and body quotations whose labels are defined after the
+  calling code. A deferred-output mechanism (`inq` flag + `qout` buffer)
+  accumulates quotation bodies and flushes them at the end of each function.
+  A label stack (`ls`) saves and restores `inq` and label numbers across
+  recursive parser calls so nested control flow works correctly.
+- `break` and `continue` emit the native µFlux `break`/`cont` opcodes.
+- C comparison operators map directly to v10 native opcodes: `==`→`eq`,
+  `!=`→`eq not`, `<`→`lt`, `<=`→`gt not`, `>`→`gt`, `>=`→`lt not`,
+  `!`→`not`, `&&`→`not not swp not not and`, `||`→`not not swp not not or`.
+  No helper subroutines are needed (v10 has native comparison opcodes).
 - The emitted program begins with a fixed preamble: the libc IMPORTs,
-  `extern "stdout"`, `jmp main`, and helper subroutines
-  `eq/ne/lt/le/gt/ge/lnot/nz/land/lor` (comparisons via 63×`shr` sign
-  extraction and `je`; µFlux has no native comparison opcodes).
+  `extern "stdout"`, then `entry:` (replacing the old `jmp main`).
 - String-literal escapes in the C input are decoded by the lexer
   (`\n \t \r \\ \' \" \0`).
 
 ## Tests
 
 - `tests/hello.c` — original round-trip test.
-- `tests/true.c`, `false.c`, `echo.c`, `yes.c`, `wc.c` — GNU coreutils
-  adaptations; behavior diffed against the system binaries
-  (see `tests/README.md` for the exact cases and adaptations).
+- `tests/true.c`, `false.c`, `yes.c` — GNU coreutils adaptations; behavior
+  diffed against the system binaries (see `tests/README.md`).
+- `tests/echo.c`, `wc.c` — require deep `else-if` chains that stress the
+  µFlux GC's string-concatenation path; may crash the transpiler on very
+  deep nesting (>6 levels of `else if` with nested loops).

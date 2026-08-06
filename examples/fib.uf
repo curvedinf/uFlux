@@ -1,8 +1,12 @@
-; fib.uf — v8 dense: iterative fib, prints fib(20)=6765
-𓎤𓍣!𓎥𓍤!𓎸𓍥!
-𓎛
-𓍥@𓂼𓎜
-𓍣@𓍤@+𓍦!𓍤@𓍣!𓍦@𓍤!𓍥@𓎥-𓍥!
-𓂻𓎛
-𓎜
-𓍣@"fib(20)=%d\n"𓂎
+; fib.uf — iterative fib, prints fib(20)=6765
+0 a! 1 b! 20 n!
+'cond 'body while
+a@ "fib(20)=%d\n" print drop
+cond:
+  n@ 0 gt ret
+body:
+  a@ b@ + tmp!
+  b@ a!
+  tmp@ b!
+  n@ 1 - n!
+  0 ret

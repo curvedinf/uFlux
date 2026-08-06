@@ -4,29 +4,12 @@
 dict d!
 ws@ len n!
 0 i!
-wloop:
-  i@ n@ - jz wdone
-  ws@ i@ get w!
-  d@ w@ getq dup jz miss
-  1 + nv! jmp put
-miss:
-  drop 1 nv!
-put:
-  d@ w@ nv@ set
-  i@ 1 + i!
-  jmp wloop
-wdone:
+'wcond 'wbody while
 d@ len "unique=%d\n" print drop
 d@ "the" getq "the=%d\n" print drop
 d@ "cat" getq "cat=%d\n" print drop
 ; MATCH: capture-group extraction
-"user=alice id=42" "user=([a-z]+) id=([0-9]+)" match jz rxfail
-dup 1 get "name=%s\n" print drop
-2 get "id=%s\n" print drop
-jmp rxdone
-rxfail:
-  "match failed\n" print drop
-rxdone:
+"user=alice id=42" "user=([a-z]+) id=([0-9]+)" match 'rxok 'rxfail ifelse
 ; REPLACE: backref word swap
 "hello world" "(h)([a-z]+) (w)([a-z]+)" "\\3\\4 \\1\\2" replace "swap=%s\n" print drop
 ; RSPLIT: split on runs of digits
@@ -50,3 +33,23 @@ rxdone:
 "prefix-body" "body" ends "ends=%d\n" print drop
 ; SPLIT + JOIN round trip
 "x,y,,z" "," split ";" join "sj=%s\n" print drop
+ret
+wcond:
+  i@ n@ - ret
+wbody:
+  ws@ i@ get w!
+  d@ w@ getq dup 'wfound 'wmiss ifelse
+  d@ w@ nv@ set
+  i@ 1 + i!
+  0 ret
+wfound:
+  1 + nv! 0 ret
+wmiss:
+  drop 1 nv! 0 ret
+rxok:
+  dup 1 get "name=%s\n" print drop
+  2 get "id=%s\n" print drop
+  0 ret
+rxfail:
+  drop "match failed\n" print drop
+  0 ret

@@ -110,18 +110,9 @@ pub fn for_body_range(ins: &[Ins], bs: usize) -> Option<usize> {
     None
 }
 pub fn inlinable_for(p: &Parsed, bs: usize, be: usize) -> bool {
-    let resolve = |name: &str| -> usize {
-        *p.labels.get(name).unwrap_or_else(|| panic!("undefined label {}", name))
-    };
     for (_j, ins) in p.ins.iter().enumerate().take(be).skip(bs) {
         match ins {
             Ins::Ret => return false,
-            Ins::Jmp(l) | Ins::Jz(l) | Ins::Je(l) => {
-                let t = resolve(l);
-                if t < bs || t >= be {
-                    return false;
-                }
-            }
             _ => {}
         }
     }
@@ -137,6 +128,7 @@ pub fn emit_range(
     p: &Parsed,
     targets: &std::collections::HashSet<usize>,
     inline_fors: &HashMap<usize, (usize, usize)>,
+    inline_ffolds: &HashMap<usize, (usize, usize)>,
     suppress: &std::collections::HashSet<usize>,
     ext_idx: &HashMap<&str, usize>,
     start: usize,
@@ -250,26 +242,23 @@ pub fn emit_range(
                             }
                         }
                         _ => {
-                            vflush(&mut e, &mut vstack, &mut vcache);
-                            e.push_str(&format!("{}(cx);\n", h));
+                            let is_inlined_ffold = *h == "op_ffold" && depth < 8 && inline_ffolds.contains_key(&i);
+                            if is_inlined_ffold {
+                                if let Some((bs, be)) = inline_ffolds.get(&i).copied() {
+                                    vflush(&mut e, &mut vstack, &mut vcache);
+                                    e.push_str("{Cell _ff_acc=pop(cx),_ff_p=pop(cx);FILE*_fp=fopen(uf_sptr(_ff_p),\"r\");if(!_fp)die(\"FFOLD: cannot open file\");char*_line=0;size_t _ncap=0;ssize_t m;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FF_C_");
+                                    e.push_str(&format!("{}{};cx->loops[fr].end=&&K_FF_E_{}{};while((m=getline(&_line,&_ncap,_fp))>=0){{while(m>0&&(_line[m-1]=='\\n'||_line[m-1]=='\\r'))_line[--m]=0;Cell _ls=uf_str_new(_line,(size_t)m);pushc(cx,_ff_acc);pushc(cx,_ls);\n", prefix, i, prefix, i));
+                                    let inner = format!("{}FF{}_", prefix, i);
+                                    emit_range(&mut e, p, targets, inline_fors, inline_ffolds, suppress, ext_idx, bs, be, &inner, depth + 1);
+                                    e.push_str(&format!("K_FF_C_{}{}:;_ff_acc=pop(cx);}}K_FF_E_{}{}:;cx->lsp=fr;free(_line);fclose(_fp);pushc(cx,_ff_acc);}}\n", prefix, i, prefix, i));
+                                }
+                            } else {
+                                vflush(&mut e, &mut vstack, &mut vcache);
+                                e.push_str(&format!("{}(cx);\n", h));
+                            }
                         }
                     }
                 }
-            }
-            Ins::Jmp(l) => {
-                vflush(&mut e, &mut vstack, &mut vcache);
-                e.push_str(&format!("goto {};\n", plab(prefix, resolve(l))))
-            }
-            Ins::Jz(l) => {
-                let t = vpop(&mut e, &mut vstack, &mut vtmp);
-                vflush(&mut e, &mut vstack, &mut vcache);
-                e.push_str(&format!("if(uf_zero({})) goto {};\n", t, plab(prefix, resolve(l))))
-            }
-            Ins::Je(l) => {
-                let b = vpop(&mut e, &mut vstack, &mut vtmp);
-                let a = vpop(&mut e, &mut vstack, &mut vtmp);
-                vflush(&mut e, &mut vstack, &mut vcache);
-                e.push_str(&format!("if(uf_ceq({},{})) goto {};\n", a, b, plab(prefix, resolve(l))))
             }
             Ins::For => {
                 vflush(&mut e, &mut vstack, &mut vcache);
@@ -288,7 +277,7 @@ pub fn emit_range(
                         // BREAK/CONT unwind out of the C loop.
                         e.push_str(&format!("{{int64_t cnt=pop(cx).i;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FC_{}{};cx->loops[fr].end=&&K_FE_{}{};for(int64_t uf_k=0;uf_k<cnt;uf_k++){{pushi(cx,uf_k);\n", prefix, i, prefix, i));
                         let inner = format!("{}F{}_", prefix, i);
-                        emit_range(&mut e, p, targets, inline_fors, suppress, ext_idx, bs, be, &inner, depth + 1);
+                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, suppress, ext_idx, bs, be, &inner, depth + 1);
                         e.push_str(&format!("K_FC_{}{}:;}}\nK_FE_{}{}:;cx->lsp=fr;}}\n", prefix, i, prefix, i));
                     }
                     None => {
@@ -317,19 +306,27 @@ pub fn emit_range(
                 vflush(&mut e, &mut vstack, &mut vcache);
                 e.push_str("{if(cx->csp==0)return;{const void* r=cx->cs[--cx->csp];if(!r)return;goto *r;}}\n")
             }
+            Ins::Goto(l) => {
+                vflush(&mut e, &mut vstack, &mut vcache);
+                e.push_str(&format!("goto {};\n", plab(prefix, resolve(l))))
+            }
+            Ins::Goto(l) => {
+                vflush(&mut e, &mut vstack, &mut vcache);
+                e.push_str(&format!("goto {};\n", plab(prefix, resolve(l))))
+            }
             // v10 structured control flow: operands are code addresses on the
             // ds, CALLed via the threaded call stack (like FOR's path).
             Ins::If => {
                 vflush(&mut e, &mut vstack, &mut vcache);
                 e.push_str(&format!(
-                    "{{const void* b=(const void*)pop(cx).i;Cell c=pop(cx);if(!uf_zero(c)){{cx->cs[cx->csp++]=&&K_{}{};goto *b;K_{}{}:;}}}}\n",
+                    "{{const void* b=(const void*)pop(cx).i;Cell c=pop(cx);if(!uf_zero(c)){{cx->cs[cx->csp++]=&&K_{}{};goto *b;K_{}{}:;pop(cx);}}}}\n",
                     prefix, i, prefix, i
                 ))
             }
             Ins::IfElse => {
                 vflush(&mut e, &mut vstack, &mut vcache);
                 e.push_str(&format!(
-                    "{{const void* el=(const void*)pop(cx).i;const void* th=(const void*)pop(cx).i;Cell c=pop(cx);cx->cs[cx->csp++]=&&K_{}{};goto *((!uf_zero(c))?th:el);K_{}{}:;}}\n",
+                    "{{const void* el=(const void*)pop(cx).i;const void* th=(const void*)pop(cx).i;Cell c=pop(cx);cx->cs[cx->csp++]=&&K_{}{};goto *((!uf_zero(c))?th:el);K_{}{}:;pop(cx);}}\n",
                     prefix, i, prefix, i
                 ))
             }
@@ -484,7 +481,7 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
     for (i, s) in p.strings.iter().enumerate() {
         let blen = s.len();
         o.push_str(&format!(
-            "static struct {{ void* gc_next; uint64_t gc_flags; uint64_t tag; uint64_t len; uint64_t esz; uint64_t ety; uint64_t mlen; const char* mdata; char d[{}]; }} uf_sl{} = {{0,0,9,{},1,0,0,0,\"{}\"}};\n",
+            "static struct {{ void* gc_next; void* gc_parent; uint64_t gc_flags; uint64_t tag; uint64_t len; uint64_t esz; uint64_t ety; uint64_t mlen; const char* mdata; char d[{}]; }} uf_sl{} = {{0,0,0,9,{},1,0,0,0,\"{}\"}};\n",
             blen + 1,
             i,
             blen,
@@ -556,6 +553,10 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
     for (_, l) in &p.exports {
         dyn_idx.insert(resolve(l));
     }
+    // Add init-TU entry points to dyn_idx so their labels are in labtab
+    for &ipc in &p.init_pcs {
+        dyn_idx.insert(ipc);
+    }
     o.push_str("  static const void* labtab[] = {");
     for &i in &dyn_idx {
         o.push_str(&format!("[{}]=&&L_{},", i, i));
@@ -563,7 +564,26 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
     if dyn_idx.is_empty() {
         o.push_str("[0]=&&L_0,");
     }
-    o.push_str("};\n  goto *labtab[pc];\n");
+    o.push_str("};\n");
+    // init-TU spawns: each init.uf entry point gets a detached pthread,
+    // spawned exactly once when main_cx enters at pc 0. We run this before
+    // the labtab dispatch so it executes on the initial call with pc=0.
+    if !p.init_pcs.is_empty() {
+        o.push_str("  if(pc==0 && cx==main_cx) {");
+        for &ipc in &p.init_pcs {
+            o.push_str(&format!(
+                "{{ pthread_t th; if(pthread_create(&th,0,uf_init_worker,(void*)&&L_{})) die(\"init thread\"); pthread_detach(th); }}",
+                ipc
+            ));
+        }
+        o.push_str("  }\n");
+    }
+    // ENTRY: if the program has an entry label, pc 0 jumps to it (replaces jmp main)
+    if let Some(el) = &p.entry_label {
+        let eidx = resolve(el);
+        o.push_str(&format!("  if(pc==0) goto L_{};\n", eidx));
+    }
+    o.push_str("  goto *labtab[pc];\n");
     // method dispatch table (SEND): (type key, name hash) -> code address
     o.push_str("  static const struct { int64_t tk; int64_t mh; const void* lab; } uf_mt[] = {");
     if p.methods.is_empty() {
@@ -585,6 +605,7 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
     // (computed address, weird layout, deep recursion) keeps the subroutine
     // path.
     let mut inline_fors: HashMap<usize, (usize, usize)> = HashMap::new();
+    let mut inline_ffolds: HashMap<usize, (usize, usize)> = HashMap::new();
     let mut suppress: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for j in 1..p.ins.len() {
         if let (Ins::PushAddr(l), Ins::For) = (&p.ins[j - 1], &p.ins[j]) {
@@ -599,8 +620,20 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
                 }
             }
         }
+        // FFOLD inlining: detect PushAddr(label), Simple("op_ffold")
+        if let (Ins::PushAddr(l), Ins::Simple(h)) = (&p.ins[j - 1], &p.ins[j]) {
+            if *h == "op_ffold" && !targets.contains(&(j - 1)) {
+                let bs = resolve(l);
+                if let Some(be) = for_body_range(&p.ins, bs) {
+                    if inlinable_for(p, bs, be) {
+                        inline_ffolds.insert(j, (bs, be));
+                        suppress.insert(j - 1);
+                    }
+                }
+            }
+        }
     }
-    emit_range(&mut o, p, &targets, &inline_fors, &suppress, &ext_idx, 0, n, "", 0);
+    emit_range(&mut o, p, &targets, &inline_fors, &inline_ffolds, &suppress, &ext_idx, 0, n, "", 0);
     o.push_str(&format!("L_{}: return;\n}}\n", n));
 
     // exported wrappers (fixed 4-arg C ABI trampoline, run on the main ctx)

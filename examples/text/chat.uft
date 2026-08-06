@@ -45,11 +45,8 @@ import c"accept"(int,ptr,ptr)->int
 import c"recv"(int,ptr,int,int)->int
 import c"send"(int,ptr,int,int)->int
 import c"strlen"(ptr)->int
-import c"atoi"(ptr)->int
 import c"prctl"(int,int)->int
 import c"exit"(int)->void
-
-jmp main
 
 ; ---- helpers ----------------------------------------------------------
 
@@ -85,66 +82,75 @@ ev@ list 1 push u@ ": " cat m@ cat push enq
 ; Reads a full HTTP request with a simple recv loop: first recv, then
 ; keep recv'ing until we see \r\n\r\n (end of headers) and have at least
 ; Content-Length bytes of body. Browsers send POST headers and body in
-; separate TCP segments. Uses jz (jump-if-zero) for all branching to avoid
-; the if/ifelse call-return-fall-through hazard.
-
+; separate TCP segments. Uses if/ifelse/while (v10 structured control flow).
 connh:
 pend@ f!
 8192 malloc b!
 f@ b@ 8000 0 call recv n!
-n@ 0 lt jz padcheck                   ; n >= 0 -> process
-b@ free                               ; n < 0 -> recv error, release
+n@ 0 lt 'nfail 'padcheck ifelse          ; n<0 -> recv error; n>=0 -> process
+0 ret
+
+nfail:                                   ; n < 0 -> recv error, release
+b@ free
 hs@ 0 enq 0 ret
 
-; recv loop
+; recv loop: keep processing until request is complete or connection closed.
+; reread flag: 1 = need more data (loop again), 0 = done (exit loop)
 padcheck:
-0 b@ n@ + storex                      ; NUL-pad at current end
-b@ "%s" fmt req!                      ; raw ptr -> str handle (NUL-padded to n bytes)
-; check if we have end of headers yet
-req@ "\r\n\r\n" find hoff!
-hoff@ 0 lt jz hcheck                  ; hoff >= 0 -> headers complete
-jmp needmore                          ; hoff < 0 -> need more data
+1 reread!
+'rcond 'rbody while
+b@ free
+'route try drop drop                    ; malformed request -> still release
+done@ not 'closefd if                   ; route didn't handle it -> close
+hs@ 0 enq 0 ret                         ; release accept loop
 
-hcheck:                               ; headers complete — check Content-Length
-req@ "Content-Length:" find cloff!
-cloff@ 0 lt jz havecl                 ; cloff >= 0 -> parse CL
-jmp allread                           ; no CL -> process what we have
+rcond:
+  reread@ ret                           ; while pops this test value
+
+rbody:
+  0 b@ n@ + storex                      ; NUL-pad at current end
+  b@ "%s" fmt req!                      ; raw ptr -> str handle
+  req@ "\r\n\r\n" find hoff!
+  hoff@ 0 lt 'needmore 'hcheck ifelse   ; hoff<0 -> need more; hoff>=0 -> check CL
+  0 ret
+
+hcheck:                                  ; headers complete — check Content-Length
+  req@ "Content-Length:" find cloff!
+  cloff@ 0 lt 'allread 'havecl ifelse   ; cloff<0 -> no CL, process; cloff>=0 -> parse
+  0 ret
 
 havecl:
-req@ cloff@ 16 + hoff@ slice clpart!
-clpart@ "\r" split 0 get trim clstr!
-0 clen!
-clstr@ len 'dgt for
-; total = hoff + 4 + clen (header boundary + separator + body length)
-hoff@ 4 + clen@ + total!
-n@ total@ lt jz allread               ; n >= total -> all done reading
-jmp needmore                          ; n < total -> need more body
-
-; done reading — process the request
-allread:
-b@ free
-'route try drop drop                  ; malformed request -> still release
-done@ not 'closefd if                 ; route didn't handle it -> close
-hs@ 0 enq 0 ret                       ; release accept loop
-
-closefd: f@ 3 sys 1 drop ret
+  req@ cloff@ 16 + hoff@ slice clpart!
+  clpart@ "\r" split 0 get trim clstr!
+  0 clen!
+  clstr@ len 'dgt for
+  hoff@ 4 + clen@ + total!
+  n@ total@ lt 'needmore 'allread ifelse ; n<total -> need more; n>=total -> done
+  0 ret
 
 dgt: i! clstr@ i@ get 48 -
-    dup 0 lt jz dgt2                  ; digit >= 0 -> check upper bound
-    jmp dskip                         ; digit < 0 -> skip
-dgt2: dup 9 gt jz dgt3                ; digit <= 9 -> accumulate
-    jmp dskip                         ; digit > 9 -> skip
-dgt3: clen@ 10 * + clen! ret
-dskip: drop ret
+    dup 0 lt 'dskip 'dgt2 ifelse
+    0 ret
+dgt2: dup 9 gt 'dskip 'dgt3 ifelse
+    0 ret
+dgt3: clen@ 10 * + clen! 0 ret
+dskip: drop 0 ret
 
+; done reading — stop the recv loop
+allread:
+  0 reread! 0 ret
+
+; need more data — recv again
 needmore:
-f@ b@ n@ + 8000 n@ - 0 call recv got!
-got@ 1 lt jz havemore                 ; got >= 1 -> append and recheck
-jmp allread                           ; got <= 0 -> connection closed
+  f@ b@ n@ + 8000 n@ - 0 call recv got!
+  got@ 1 lt 'allread 'havemore ifelse    ; got<=0 -> closed; got>=1 -> append
+  0 ret
 
 havemore:
-n@ got@ + n!
-jmp padcheck
+  n@ got@ + n!
+  1 reread! 0 ret
+
+closefd: f@ 3 sys 1 drop 0 ret
 
 ; ---- routing ----
 
@@ -161,59 +167,65 @@ done@ not 'r404 if
 
 sev: f@ evh@ call snd
      ev@ list 0 push f@ push enq      ; register fd with broker (fd stays open)
-     1 done! ret
+     1 done! 0 ret
 
-spg: f@ presp@ call snd f@ 3 sys 1 drop 1 done! ret
+spg: f@ presp@ call snd f@ 3 sys 1 drop 1 done! 0 ret
 
 ssd: 'dopar try drop drop
-     f@ okr@ call snd f@ 3 sys 1 drop 1 done! ret
+     f@ okr@ call snd f@ 3 sys 1 drop 1 done! 0 ret
 
-r404: f@ nfr@ call snd f@ 3 sys 1 drop 1 done! ret
+r404: f@ nfr@ call snd f@ 3 sys 1 drop 1 done! 0 ret
 
 ; ---- broker: sole owner of cl (client fds) and hist (frames) ----------
 
 broker:
+'bcond 'bbody while
+0 ret
+
+bcond: 1 ret                            ; infinite loop — never exits
+
+bbody:
 ev@ deq e!
 e@ 0 get 0 eq 'breg if
 e@ 0 get 1 eq 'bmsg if
-jmp broker
+0 ret                                   ; unknown event type -> loop
 
-breg:                                 ; e = [0 fd]: register + replay
+breg:                                  ; e = [0 fd]: register + replay
 e@ 1 get f2!
 cl@ f2@ push cl!
 hist@ len 'brep for
-jmp broker
+0 ret
 
 brep: i! hist@ i@ get call str2raw tmp!
       f2@ tmp@ call snd
       tmp@ free ret
 
-bmsg:                                 ; e = [1 msg]: frame, store, fan out
+bmsg:                                  ; e = [1 msg]: frame, store, fan out
 "data: " e@ 1 get cat "\n\n" cat fr!
 hist@ fr@ push hist!
 hist@ len 100 gt 'hcap if
 fr@ call str2raw frr!
-list cl2!                             ; start fresh live-client list
-cl@ len 'bc for                       ; fan out to all registered clients
-cl2@ cl!                              ; replace cl with the live-client list
+list cl2!                              ; start fresh live-client list
+cl@ len 'bc for                        ; fan out to all registered clients
+cl2@ cl!                               ; replace cl with the live-client list
 frr@ free
-jmp broker
+0 ret
 
 bc: i! cl@ i@ get bf!
     bf@ frr@ frr@ call strlen 0 call send 0 lt 'bdead 'balive ifelse
     ret
 
-balive: cl2@ bf@ push cl2! ret        ; client still alive: keep in new list
-bdead:  bf@ 3 sys 1 drop ret          ; send failed: close fd, drop client
-hcap:   hist@ hist@ len 100 - hist@ len slice hist! ret
+balive: cl2@ bf@ push cl2! 0 ret       ; client still alive: keep in new list
+bdead:  bf@ 3 sys 1 drop 0 ret         ; send failed: close fd, drop client
+hcap:   hist@ hist@ len 100 - hist@ len slice hist! 0 ret
 
 ; ---- startup ----------------------------------------------------------
 
-parg: argv 1 get call str2raw call atoi port! ret
+parg: argv 1 get atoi port! 0 ret
 
-bfail: "bind failed — port already in use?\n" print drop 1 call exit ret
+bfail: "bind failed — port already in use?\n" print drop 1 call exit 0 ret
 
-main:
+entry:
 1 9 call prctl drop                   ; PR_SET_PDEATHSIG(1)=9(SIGKILL): die if parent exits
 8080 port!
 argv len 1 gt 'parg if
@@ -246,8 +258,11 @@ list cl! list hist!                   ; broker-owned state
 'broker spawn drop
 
 ; accept loop (persistent): hand fd to a spawned handler, one at a time
-acc:
+'acond 'abody while
+0 ret
+acond: 1 ret
+abody:
 lfd@ 0 0 call accept pend!
 'connh spawn drop
 hs@ deq drop                          ; wait until handler is done
-jmp acc
+0 ret

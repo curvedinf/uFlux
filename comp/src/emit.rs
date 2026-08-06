@@ -53,6 +53,7 @@ pub fn emit_text(toks: &[Tok]) -> String {
             Tok::Sys(n) => o.push_str(&format!("sys {} ", n)),
             Tok::Ident(n) => o.push_str(&format!("{} ", n)),
             Tok::LabelDef(n) => o.push_str(&format!("{}: ", n)),
+            Tok::Entry => o.push_str("entry: "),
             Tok::Task { name, inputs, count, body } => {
                 if !in_weave {
                     o.push_str("weave\n  ");
@@ -67,6 +68,7 @@ pub fn emit_text(toks: &[Tok]) -> String {
                 o.push_str(&format!("task {} {} endt\n  ", name, emit_text(body)));
             }
             Tok::TaskEnd(_) => {}
+            Tok::Entry => {}
             Tok::Wrun => {
                 o.push_str("wrun\n");
                 in_weave = false;
@@ -169,6 +171,7 @@ pub fn emit_dense(toks: &[Tok]) -> String {
                 Tok::Sys(n) => o.push_str(&format!("{}{} ", glyph_of(49), n)),
                 Tok::Ident(n) => o.push_str(&format!("{} ", n)),
                 Tok::LabelDef(n) => o.push_str(&format!("{}\n", nm(n, names, next))),
+                Tok::Entry => o.push_str(&format!("{}\n", glyph_of(195))),
                 Tok::Task { name, inputs, count, body } => {
                     if !*weave {
                         o.push_str(&format!("{}\n", glyph_of(81)));
@@ -186,6 +189,7 @@ pub fn emit_dense(toks: &[Tok]) -> String {
                     o.push_str(&format!("{}\n", glyph_of(83)));
                 }
                 Tok::TaskEnd(_) => {}
+                Tok::Entry => {}
                 Tok::Wrun => {
                     o.push_str(&format!("{}\n", glyph_of(84)));
                     *weave = false;

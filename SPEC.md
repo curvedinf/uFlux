@@ -117,7 +117,7 @@ SUB MUL AND SHR INC DEC GET CLONE CAST ARR TENSOR OBJ CAT FMT BUF MALLOC
 LOADX SIZEOF OFFSET PRINT SCAN CALL SYS.
 
 Non-pushing tokens: program start, label definitions, LIT/STR themselves (their
-operand follows), jumps (JMP/JZ/JE/`=`), SETV/SET/STOREX/BUFCOPY/FREE/DROP
+operand follows), SETV/SET/STOREX/BUFCOPY/FREE/DROP
 and other consumers, SWP, and all directives (MACRO/STRUCT/IMPORT/EXPORT/EXTERN).
 
 Examples: `𓆨𓆤 𓆨𓆤 -` → 128 128 SUB → 0. At program start `-𓆩` → -5.
@@ -135,7 +135,7 @@ reference.
 
 - `<v-run>!` or `<v-run><SETV glyph>`: pop into variable.
 - `<v-run>@` or `<v-run><GETV glyph>`: push variable.
-- A v-run immediately after JMP/JZ/JE/`=`/CALL/ADDR/`'` is a label
+- A v-run immediately after CALL/ADDR/`'` is a label
   **reference**.
 - Any other bare v-run is a label **definition** (no colon needed).
 - ASCII `name:` still defines a label; ASCII names still work as jump targets.
@@ -211,9 +211,9 @@ and final for tooling).
 | 10 | 𓃗 | U+130D7 | `shr` | a → a>>1 |
 | 11 | 𓂥 | U+130A5 | `inc` | a → a+1 |
 | 12 | 𓂦 | U+130A6 | `dec` | a → a−1 |
-| 13 | 𓂻 | U+130BB | `jmp` | (label operand) |
-| 14 | 𓂼 | U+130BC | `jz` | cond → |
-| 15 | 𓂽 | U+130BD | `je` (`=`) | a b → |
+| —  | — | U+130BB | ~~jmp~~ | retired in v10.1 (use `entry`/`if`/`while`/`for`) |
+| —  | — | U+130BC | ~~jz~~ | retired in v10.1 (use `if`/`ifelse`/`while`) |
+| —  | — | U+130BD | ~~je~~ | retired in v10.1 (use `if`/`ifelse`) |
 | 16 | 𓂾 | U+130BE | `for` | count addr → (pushes k per iteration) |
 | 17 | 𓃀 | U+130C0 | `call` | (label operand) |
 | 18 | 𓂿 | U+130BF | `ret` | → |
@@ -322,7 +322,7 @@ and final for tooling).
 | 106 | U+1332C | `eq` | a b → 0/1 | ints by value; floats by bit pattern; strings by content; handles by identity; mixed int/float numeric. |
 | 107 | U+1332D | `lt` | a b → 0/1 | numeric, or string lexicographic; other handles: dies. |
 | 108 | U+1332E | `gt` | a b → 0/1 | as `lt`. |
-| 109 | U+1332F | `not` | a → 0/1 | 1 if a==0 (JZ truthiness); null handle → 1. |
+| 109 | U+1332F | `not` | a → 0/1 | 1 if a==0; null handle → 1. |
 | 110 | U+13330 | `or` | a b → a\|b | ints only. |
 | 111 | U+13331 | `xor` | a b → a^b | ints only. |
 | 112 | U+13332 | `shl` | a b → a<<b | ints only; b<0 or b≥64: dies. |
@@ -548,6 +548,12 @@ weave fanout input), a progress reporter (atom counter + spawn loop on
 `sys` nanosleep), a slow writer (spawn running `femit` over a chan so the
 main line never blocks on disk).
 
+**Entry point (195).**
+
+| idx | glyph cp | mnemonic | stack effect | notes |
+|-----|----------|----------|--------------|-------|
+| 195 | U+13264 | `entry` | → | Marks the program entry point. When present, the compiler emits an implicit jump from pc 0 to this location. Replaces the old `jmp main` pattern. Programs without `entry` start at pc 0 as before. |
+
 ## ASCII tokens (dense)
 
 Eight operators have ASCII spellings; the glyphs above remain accepted for
@@ -559,7 +565,6 @@ them. (Historical note: these tokens were introduced in v8 and are unchanged.)
 | `-` | SUB or number sign, by the lookback rule (above) |
 | `*` | MUL |
 | `&` | AND |
-| `=<label>` | JE to label |
 | `<v-run>@` | GETV (push variable) |
 | `<v-run>!` | SETV (pop into variable) |
 | `'<label>` | ADDR (push code address of label) |
@@ -619,6 +624,33 @@ a TU's top-level flow never falls into the next TU). Per-TU:
 - Encodings may be mixed freely (per-TU auto-detection).
 - Implementation: per-TU lex+parse, one merged codegen, one C file, one cc
   run. Object-file linking is deferred (see Non-goals).
+
+## Directory mode and init threads
+
+Bare `uf` (or `uf somedir/`) discovers source files automatically:
+
+- **Root**: all `*.uf`/`*.uft` in `.` are compiled as TUs. `main.uf` (or
+  `main.uft`) is the entry point (first TU, pc 0). Error if not found.
+- **Subdirectory with `init.uf`** (or `init.uft`): all `*.uf`/`*.uft` in it are
+  compiled as TUs. The `init.uf` is flagged as an **init TU**: its top-level
+  code runs in a separate thread, automatically spawned before `main` starts.
+  Recurses into nested init subdirs.
+- **Subdirectory without `init.uf`**: ignored entirely.
+- `mods/` is never scanned (`.ufm` manifests, not source files).
+
+Init threads are detached pthreads — fire-and-forget services that start
+before `main` and are killed when the process exits. Each gets its own `Ctx`
+(data stack, call stack); variables are shared (global statics), as with all
+TUs. Coordination between init threads and `main` uses the existing channel
+(`chan`/`enq`/`deq`) and PUB/CALL mechanisms — an init thread creates a channel
+at startup and publishes its handle via a PUB function that `main` calls to
+get the channel. Because init threads start concurrently with `main`, a
+retry/sleep loop in `main` may be needed until the init thread's channel is
+ready (shared-variable races are the script's own problem, as documented).
+
+Explicit-file mode (`uf hello.uf`, `uf -c a.uf b.uf ...`) is unchanged — no
+discovery, no init threads. Directory mode and explicit-file mode produce
+identical binaries for the same set of files.
 
 ## Reflection
 
@@ -872,7 +904,7 @@ dense).
   `-5` is a number: **the dense lookback rule does not exist in text mode**.
   Bare decimal/hex/float literals self-evaluate; `lit` stays for type ids and
   explicitness. Type words: `int float ptr byte void handle str bool`.
-- Names: label def `name:`, refs `jmp name` / `'name` (or `addr name`),
+- Names: label def `name:`, refs `'name` (or `addr name`),
   variables `name!` / `name@` — any identifier, not just v-slots. Opcode
   mnemonics are reserved words; using one as a label/variable = compile error.
 - Mnemonic table (normative): the mnemonic column of the opcode tables above
@@ -914,7 +946,7 @@ string       := '"' ... '"'                          // self-evaluating (PushS)
 varset       := v-run ('!' | SETV-glyph)
 varget       := v-run ('@' | GETV glyph)
 labeldef     := v-run | ASCII-name ':'
-jump         := (JMP|JZ|JE|CALL glyph | '=' | "'") (v-run | ASCII-name)
+jump         := (CALL glyph | "'") (v-run | ASCII-name)
 op           := opcode glyph | '+' | '-' | '*' | '&'
 directive    := IMPORT c"name"(params)->ret | EXPORT "name" | EXTERN "sym"
              | MACRO name { token* } | STRUCT name { field:type, ... }
@@ -953,7 +985,7 @@ a `--` separator is forwarded as the program's argv (run mode only;
 Runtime cells are **16 bytes**: `{tag, i64}` (was `{tag, i64, f64, ptr}`).
 Pointer payloads live in `i` (cast at use sites); FLOAT cells store the
 double **bit pattern** in `i` — `uf_f()` converts tag-aware for mixed
-int/float arithmetic, and JZ keeps its historical truthiness
+int/float arithmetic, and truth testing uses `eq`/`not`
 (`(int64_t)value == 0`). Behavior-visible edge: `%d`-printing or int-casting
 a FLOAT cell now reads the bit pattern instead of a synchronised truncation.
 Tagged objects (ARR/TENSOR/LIST/DICT/STR/CHAN/ATOM/BUF/OBJ/BITMAP/BLOOM)
@@ -1108,7 +1140,7 @@ input order), MSP/mobile targets.
     opcodes).
   - l-space (U+133A4..) numbers are self-evaluating; LIT no longer required.
   - 8 ASCII operator tokens added; bare strings self-evaluate.
-  - Label definitions need no colon; `'` is ADDR, `=` is JE, `@`/`!` are
+  - Label definitions need no colon; `'` is ADDR, `@`/`!` are
     GETV/SETV.
   - `-` is SUB or sign by the (dense-only) lookback rule.
   - SETI operand order changed to `handle idx value`.

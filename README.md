@@ -6,6 +6,21 @@ is used like a scripting language inline in your existing CLI, but every script 
 a C compiled binary so it is near maximally fast. Many powerful features are integrated as 
 core language operations, enabling immediate optimal results from LLM tool use.
 
+### Language at a glance
+
+| Property | µFlux |
+|---|---|
+| **Execution** | Compiled — source → C → native binary via `cc` |
+| **Typing** | Dynamically typed — cells carry a runtime tag (`int`, `float`, `str`, `ptr`, …) |
+| **Type coercion** | Implicit — arithmetic ops auto-coerce strings to numbers (`"384" 2 +` → 386); explicit `atoi`/`atof`/`itoa`/`ftoa` opcodes available |
+| **Memory** | Garbage collected — precise, non-moving, stop-the-world mark-sweep; scripts never `free` managed objects |
+| **Paradigm** | Stack machine — postfix, no expression syntax, program reads in execution order |
+| **Concurrency** | CSP — bounded channels (`chan`/`enq`/`deq`), `spawn` for detached threads, `weave` for dataflow fanout |
+| **Encodings** | Two: dense (Egyptian-hieroglyph glyphs, one token per op) and text (English mnemonics) |
+| **FFI** | Zero-overhead C import — `import c"fn"(types)->ret`, links directly via `cc` |
+| **Core data ops** | `split`, `find`, `match` (regex), `sort`, `group`, `keys`, `get`/`set` — all built-in, no stdlib imports |
+| **File I/O** | `slurp`, `spit`, `ffold` (streaming reduce), `feach` (streaming per-line), `mmap` (zero-copy) — all core opcodes |
+
 ### Where do these advantages come from?
 
 ```

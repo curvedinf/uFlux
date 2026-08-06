@@ -1,5 +1,3 @@
 ; lib.uf — MTU library TU: PUB helper visible across TUs
-𓂻𓎡
-𓋷𓍬
-𓎦*𓂿
-𓎡
+pub dbl:
+  2 * ret

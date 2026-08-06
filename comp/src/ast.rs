@@ -14,7 +14,7 @@ pub enum Tok {
     PushI(i64),
     PushF(f64),
     PushS(String),             // STR literal
-    Jump(&'static str, String), // JMP/JZ/JE/FOR/CALL/ADDR + label
+    Jump(&'static str, String), // CALL/ADDR + label (JMP/JZ/JE removed in v10.1)
     SetV(String),
     GetV(String),
     Import(Import),
@@ -32,6 +32,7 @@ pub enum Tok {
     Sys(usize),                // arity immediate (default 0)
     Ident(String),             // macro invocation site
     LabelDef(String),
+    Entry,                     // ENTRY — marks the program entry point (replaces jmp main)
 }
 
 // ---------------- parser ----------------
@@ -42,9 +43,6 @@ pub enum Ins {
     PushS(usize),
     PushAddr(String),
     Simple(&'static str), // maps to a C helper op_*
-    Jmp(String),
-    Jz(String),
-    Je(String),
     For,
     Call(String),
     CallExt(usize),
@@ -61,6 +59,7 @@ pub enum Ins {
     While,                       // cond_addr body_addr ->
     Break,                       // -> (nearest enclosing loop)
     Cont,                        // -> (nearest enclosing loop)
+    Goto(String),                // internal: unconditional goto label (weave task skip)
 }
 
 #[derive(Clone, Debug)]
@@ -83,6 +82,8 @@ pub struct Parsed {
     pub modname: Option<String>,
     pub pubs: Vec<String>, // label names marked PUB (exported cross-TU)
     pub methods: Vec<(i64, i64, String)>, // (type key, method name hash, label)
+    pub init_pcs: Vec<usize>, // instruction offsets of init-TU entry points (auto-thread)
+    pub entry_label: Option<String>, // label name of the ENTRY marker (jmp-from-pc0 target)
 }
 
 // struct layouts: field name -> offset, total size, struct id. Shared across

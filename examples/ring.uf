@@ -1,18 +1,24 @@
-; ring.uf — v10: producer/consumer over CHAN, ATOM counter, sum=5050
-𓎬𓊷𓍤!𓎤𓋰𓍥!
-𓐍
-𓐎𓍧 𓎥𓍫!
-𓍶
-𓍫@𓎥𓏉-𓂼𓍷
-𓍤@𓍫@𓂺𓍫@𓂥𓍫!
-𓂻𓍶
-𓍷
-𓍤@𓉣𓐏
-𓐎𓍨 𓎤𓍬!
-𓍶
-𓍬@𓎥𓏈-𓂼𓍷
-𓍥@𓍤@𓃁𓂟𓂹𓍬@𓂥𓍬!
-𓂻𓍶
-𓍷𓐏
-𓐐
-𓍥@𓂆"sum=%d\n"𓂎
+; ring.uf — producer/consumer over CHAN, ATOM counter, sum=5050
+8 chan cq! 0 atom ac!
+weave
+  task prod
+    1 i!
+    'pcond 'pbody while
+    cq@ close
+    pcond:
+      i@ 101 lt ret
+    pbody:
+      cq@ i@ enq
+      i@ 1 + i!
+      0 ret
+  endt
+  task cons
+    'ccond 'cbody while
+    ccond:
+      cq@ deq dup val! val@ 0 gt ret
+    cbody:
+      ac@ val@ aadd drop
+      0 ret
+  endt
+wrun
+ac@ aget "sum=%d\n" print drop

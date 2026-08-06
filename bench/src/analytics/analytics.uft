@@ -1,90 +1,59 @@
-jmp main
 fl:
 ln! drop
+first@ not 'proc if
+0 first!
+0 ret
+proc:
 ln@ "," split c!
 c@ 2 get region!
 c@ 3 get country!
 c@ 4 get product!
-c@ 7 get bparse units!
-c@ 10 get fparse total!
+c@ 7 get atoi units!
+c@ 10 get atof total!
 tr@ total@ + tr!
 tu@ units@ + tu!
-rr@ region@ getq 0 + rv!
+rr@ region@ getq rv!
 rr@ region@ rv@ total@ + set
-pr@ product@ getq 0 + pv!
+pr@ product@ getq pv!
 pr@ product@ pv@ total@ + set
-cr@ country@ getq 0 + cv!
+cr@ country@ getq cv!
 cr@ country@ cv@ total@ + set
 rows@ 1 + rows!
 0 ret
-bparse:
-s!
-0 result!
-0 bi!
-s@ 0 get ch!
-'bpc 'bpb while drop
-result@ ret
-bpc:
-ch@ 48 lt jz bpc2
-0 ret
-bpc2:
-ch@ 57 gt jz bpc3
-0 ret
-bpc3:
-1 ret
-bpb:
-result@ 10 * ch@ 48 - + result!
-bi@ 1 + bi!
-s@ bi@ get ch!
-0 ret
-fparse:
-s!
-s@ "." find dot!
-s@ 0 dot@ slice intpart!
-intpart@ bparse whole!
-dot@ 1 + s@ len dot@ 1 + - slice fracpart!
-fracpart@ 0 get f0!
-fracpart@ 1 get f1!
-f0@ 48 - 10 fracpart@ 2 get 48 - + fracpart@ 3 get 48 - 0.01 * + + fracval!
-whole@ fracval@ + ret
-emit:
-d! items! n!
-0 idx!
-items@ len 'elf for
 elf:
 k!
 items@ k@ get name!
-d@ name@ getq val!
-idx@ n@ lt 'em if
+curdict@ name@ getq val!
+idx@ n@ lt 'doemit if
 idx@ 1 + idx!
+ret
+doemit:
+idx@ 1 + rank!
+prefix@ rank@ name@ val@ "%s%d: %s $%.2f\n" print drop
 0 ret
-em:
-name@ val@ "%s $%.2f\n" print drop
-idx@ 1 + idx!
+useargv:
+argv 1 get p!
 0 ret
-main:
-0 tr! 0 tu! 0 rows!
+entry
+0 tr! 0 tu! 0 rows! 1 first!
 dict rr!
 dict pr!
 dict cr!
-argv len 1 gt jz usedefault
-argv 1 get p!
-jmp go
-usedefault:
 "bench/data/sales.csv" p!
-go:
+argv len 1 gt 'useargv if
 p@ 0 'fl ffold drop
 "=== DATA ANALYTICS RESULTS ===\n" print drop
 rows@ "total_rows: %d\n" print
 tr@ "total_revenue: %.2f\n" print
 tr@ rows@ div "avg_order: %.2f\n" print
 tu@ "total_units: %d\n" print
-rr@ keys rk!
-rk@ sort rk!
-rr@ rk@ 6 'emit drop
-pr@ keys pk!
-pk@ sort pk!
-pr@ pk@ 5 'emit drop
-cr@ keys ck!
-ck@ sort ck!
-cr@ ck@ 3 'emit drop
+"region_" prefix!
+rr@ curdict! rr@ keys rk! rk@ sort rk! rk@ items!
+6 n! 0 idx! 0 rank! rk@ len 'elf for
+"product_" prefix!
+pr@ curdict! pr@ keys pk! pk@ sort pk! pk@ items!
+5 n! 0 idx! 0 rank! pk@ len 'elf for
+"country_" prefix!
+cr@ curdict! cr@ keys ck! ck@ sort ck! ck@ items!
+3 n! 0 idx! 0 rank! ck@ len 'elf for
+ret

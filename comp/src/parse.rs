@@ -50,6 +50,8 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
         modname: None,
         pubs: Vec::new(),
         methods: Vec::new(),
+        init_pcs: Vec::new(),
+        entry_label: None,
     };
     let mut q: VecDeque<Tok> = toks.into();
     let mut pending_export: Option<String> = None;
@@ -79,9 +81,6 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
                 p.ins.push(Ins::PushS(idx));
             }
             Tok::Jump(op, label) => match op {
-                "JMP" => p.ins.push(Ins::Jmp(label)),
-                "JZ" => p.ins.push(Ins::Jz(label)),
-                "JE" => p.ins.push(Ins::Je(label)),
                 "ADDR" => p.ins.push(Ins::PushAddr(label)),
                 "CALL" => {
                     if let Some(ii) = p.imports.iter().position(|im| im.name == label) {
@@ -90,6 +89,9 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
                         p.ins.push(Ins::Call(label));
                     }
                 }
+                "JMP" => panic!("jmp removed — use entry/if/while/for"),
+                "JZ" => panic!("jz removed — use if/ifelse/while"),
+                "JE" => panic!("je removed — use if/ifelse"),
                 _ => unreachable!(),
             },
             Tok::SetV(n) => {
@@ -157,10 +159,9 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
                         panic!("WEAVE: task {} worker count {} out of range 1..64", name, c);
                     }
                 }
-                // emit: JMP over the body; task entry label; body; RET (via TaskEnd)
                 let skip = format!("__wskip{}", weave_ctr);
                 weave_ctr += 1;
-                p.ins.push(Ins::Jmp(skip.clone()));
+                p.ins.push(Ins::Goto(skip.clone()));
                 p.labels.insert(name.clone(), p.ins.len());
                 // task bodies are self-contained: their labels are task-local,
                 // so two tasks may reuse the same v-names
@@ -234,6 +235,10 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
                 if let Some(x) = pending_export.take() {
                     p.exports.push((x, n));
                 }
+            }
+            Tok::Entry => {
+                p.labels.insert("entry".to_string(), p.ins.len());
+                p.entry_label = Some("entry".to_string());
             }
             Tok::Ident(n) => {
                 if let Some(rest) = n.strip_prefix("@sizeof:") {
@@ -371,7 +376,7 @@ pub fn prefix_task_labels(body: Vec<Tok>, prefix: &str) -> Vec<Tok> {
 // Labels are mangled "<mod>:<name>"; jump/call operands defined in the same TU
 // are rewritten to the mangled name, everything else stays a global (PUB) name.
 // Variables are always file-local: "<mod>__<name>". IMPORT/EXTERN/USE dedupe.
-pub fn merge_tus(tus: Vec<Parsed>, mods: Vec<String>) -> Parsed {
+pub fn merge_tus(tus: Vec<Parsed>, mods: Vec<String>, init_flags: &[bool]) -> Parsed {
     let mut m = Parsed {
         ins: Vec::new(),
         labels: HashMap::new(),
@@ -384,10 +389,15 @@ pub fn merge_tus(tus: Vec<Parsed>, mods: Vec<String>) -> Parsed {
         modname: None,
         pubs: Vec::new(),
         methods: Vec::new(),
+        init_pcs: Vec::new(),
+        entry_label: None,
     };
-    for (tu, defmod) in tus.into_iter().zip(mods) {
+    for (tu_idx, (tu, defmod)) in tus.into_iter().zip(mods).enumerate() {
         let modname = tu.modname.clone().unwrap_or(defmod);
         let off = m.ins.len();
+        if init_flags.get(tu_idx).copied().unwrap_or(false) {
+            m.init_pcs.push(off);
+        }
         let str_base = m.strings.len();
         let mut imp_map: Vec<usize> = Vec::new();
         for im in &tu.imports {
@@ -414,9 +424,7 @@ pub fn merge_tus(tus: Vec<Parsed>, mods: Vec<String>) -> Parsed {
                 Ins::PushS(i) => Ins::PushS(i + str_base),
                 Ins::PushAddr(l) => Ins::PushAddr(local(l)),
                 Ins::Simple(h) => Ins::Simple(h),
-                Ins::Jmp(l) => Ins::Jmp(local(l)),
-                Ins::Jz(l) => Ins::Jz(local(l)),
-                Ins::Je(l) => Ins::Je(local(l)),
+                Ins::Goto(l) => Ins::Goto(local(l)),
                 Ins::For => Ins::For,
                 Ins::Call(l) => Ins::Call(local(l)),
                 Ins::CallExt(ii) => Ins::CallExt(imp_map[*ii]),
@@ -472,6 +480,12 @@ pub fn merge_tus(tus: Vec<Parsed>, mods: Vec<String>) -> Parsed {
         for u in &tu.uses {
             if !m.uses.contains(u) {
                 m.uses.push(u.clone());
+            }
+        }
+        // carry entry_label from the first TU only
+        if tu_idx == 0 {
+            if let Some(el) = &tu.entry_label {
+                m.entry_label = Some(format!("{}:{}", modname, el));
             }
         }
     }
@@ -632,6 +646,10 @@ pub fn simple_ins(name: &'static str) -> Ins {
         "TRY" => "op_try",
         "RETRY" => "op_retry",
         "SPAWN" => "op_spawn",
+        "ATOI" => "op_atoi",
+        "ATOF" => "op_atof",
+        "ITOA" => "op_itoa",
+        "FTOA" => "op_ftoa",
         other => panic!("no helper for {}", other),
     };
     Ins::Simple(helper)

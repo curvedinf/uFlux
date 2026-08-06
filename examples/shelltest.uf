@@ -6,13 +6,7 @@ lines@ 0 get "first=%s\n" print drop
 ; SHP: streaming producer drained by a DEQ loop with an ATOM counter
 0 atom n!
 "for i in 1 2 3 4 5; do echo line$i; sleep 0.05; done" shp ch!
-loop:
-  ch@ deq dup jz done
-  "got: %s\n" print drop
-  n@ 1 aadd drop
-  jmp loop
-done:
-  drop
+'cond 'body while
 n@ aget "count=%d\n" print drop
 ; EXEC: argv list, no shell
 list "echo" push "exec-works" push exec "exec-status=%d\n" print drop
@@ -20,3 +14,10 @@ list "echo" push "exec-works" push exec "exec-status=%d\n" print drop
 "echo out; echo err 1>&2; exit 7" sh "sh-status=%d\n" print drop "sh-err=%s" print drop "sh-out=%s" print drop
 ; SH: fire-and-forget, status only (drop captured output)
 "exit 0" sh "sh-status=%d\n" print drop drop drop
+ret
+cond:
+  ch@ deq dup msg! ret
+body:
+  msg@ "got: %s\n" print drop
+  n@ 1 aadd drop
+  0 ret

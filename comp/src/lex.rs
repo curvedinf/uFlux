@@ -12,7 +12,7 @@ pub const TYPE_BASE: u32 = 0x13110;
 // glyphs (U+13110..13117). Index = opcode index in OP_NAMES.
 // Retired v9 indices (22,24,25,30,31,32,39,57..61,76,77,86,87,151,152) have
 // no glyph and no mnemonic: using them is a compile error.
-pub const CUSTOM_OPS: [(u32, usize); 174] = [
+pub const CUSTOM_OPS: [(u32, usize); 172] = [
     (0x13340, 0),  // LIT    𓍀 papyrus scroll — a written constant
     (0x13050, 1),  // DUP    𓁐 pair — duplicate
     (0x13051, 2),  // OVR    𓁑 pair variant — second copy
@@ -26,9 +26,7 @@ pub const CUSTOM_OPS: [(u32, usize); 174] = [
     (0x130D7, 10), // SHR    𓃗 shift right
     (0x130A5, 11), // INC    𓂥 arm raised
     (0x130A6, 12), // DEC    𓂦 arm lowered
-    (0x130BB, 13), // JMP    𓂻 legs (D54)
-    (0x130BC, 14), // JZ     𓂼 legs variant
-    (0x130BD, 15), // JE     𓂽 legs variant
+    // indices 13-15 (JMP/JZ/JE) retired in v10.1 — removed from language
     (0x130BE, 16), // FOR    𓂾 legs in a loop
     (0x130C0, 17), // CALL   𓃀 foot (D58)
     (0x130BF, 18), // RET    𓂿 legs returning
@@ -202,6 +200,7 @@ pub const CUSTOM_OPS: [(u32, usize); 174] = [
     // ---- v10: detached threads ----
     (0x13357, 189), // SPAWN
     (0x13358, 190), // VEMIN
+    (0x13264, 195), // ENTRY  𓉤 — entry point marker (replaces jmp main)
 ];
 
 pub fn opcode_index(c: char) -> Option<usize> {
@@ -230,12 +229,12 @@ pub fn glyph_type_id(c: char) -> Option<i64> {
     }
 }
 
-// 191 opcode slots (0..=190). Retired indices use "~NN" placeholders: they
+// 196 opcode slots (0..=195). Retired indices use "~NN" placeholders: they
 // have no glyph, no text mnemonic, and no runtime helper — any use is a
 // compile error (unassigned glyph / unknown identifier).
-pub const OP_NAMES: [&str; 191] = [
+pub const OP_NAMES: [&str; 196] = [
     "LIT", "DUP", "OVR", "DRP", "SWP", "PICK", "ADD", "SUB", "MUL", "AND", "SHR", "INC", "DEC",
-    "JMP", "JZ", "JE", "FOR", "CALL", "RET", "OBJ", "GET", "SET", "~22", "ARR", "~24", "~25",
+    "~13", "~14", "~15", "FOR", "CALL", "RET", "OBJ", "GET", "SET", "~22", "ARR", "~24", "~25",
     "CLONE", "CAST", "MACRO", "TENSOR", "~30", "~31", "~32", "SETV", "GETV", "STR", "CAT", "FMT",
     "BUF", "~39", "BUFCOPY", "ADDR", "LOADX", "STOREX", "SIZEOF", "OFFSET", "STRUCT", "MALLOC",
     "FREE", "SYS", "GC", "IMPORT", "EXPORT", "EXTERN", "PRINT", "SCAN",
@@ -266,6 +265,8 @@ pub const OP_NAMES: [&str; 191] = [
     // v10: JSON, iterators, sinks, containment, threads
     "JSON", "UNJSON", "ITER", "NEXT", "COLLECT", "IMAP", "IFILTER", "FEMIT",
     "TRY", "RETRY", "SPAWN", "VEMIN",
+    "ATOI", "ATOF", "ITOA", "FTOA",
+    "ENTRY",
 ];
 
 pub fn op_index(name: &str) -> Option<usize> {
@@ -536,6 +537,13 @@ impl Lexer {
                 }
                 continue;
             }
+            // ---- retired JMP/JZ/JE glyphs (removed in v10.1) ----
+            match cp {
+                0x130BB => self.err("jmp removed — use entry/if/while/for"),
+                0x130BC => self.err("jz removed — use if/ifelse/while"),
+                0x130BD => self.err("je removed — use if/ifelse"),
+                _ => {}
+            }
             // ---- ASCII operator tokens ----
             match c {
                 '+' => {
@@ -557,12 +565,7 @@ impl Lexer {
                     continue;
                 }
                 '=' => {
-                    self.pos += 1;
-                    self.skip_ws();
-                    let label = self.jump_label("JE");
-                    out.push(Tok::Jump("JE", label));
-                    self.pushed = false;
-                    continue;
+                    self.err("= (je) removed — use if/ifelse");
                 }
                 '\'' => {
                     // ADDR: '<label> (v-run or ASCII)
@@ -676,6 +679,7 @@ impl Lexer {
                 | "MMAP" | "FFOLD" | "FMATCH" | "BFS" | "DFS" | "WFIND"
                 | "JSON" | "UNJSON" | "ITER" | "NEXT" | "COLLECT" | "IMAP" | "IFILTER"
                 | "FEMIT" | "TRY" | "RETRY" | "SPAWN"
+                | "ATOI" | "ATOF" | "ITOA" | "FTOA"
         );
     }
 
@@ -733,7 +737,13 @@ impl Lexer {
             "JMP" | "JZ" | "JE" | "CALL" | "ADDR" => {
                 self.skip_ws();
                 let label = self.jump_label(name);
+                if name == "JMP" { self.err("jmp removed — use entry/if/while/for"); }
+                if name == "JZ" { self.err("jz removed — use if/ifelse/while"); }
+                if name == "JE" { self.err("je removed — use if/ifelse"); }
                 out.push(Tok::Jump(OP_NAMES[idx], label));
+            }
+            "ENTRY" => {
+                out.push(Tok::Entry);
             }
             "IMPORT" => {
                 self.skip_ws();
@@ -1009,8 +1019,8 @@ pub fn text_mnemonic(idx: usize) -> &'static str {
     match OP_NAMES[idx] {
         "LIT" => "lit", "DUP" => "dup", "OVR" => "ovr", "DRP" => "drop", "SWP" => "swp",
         "PICK" => "pick", "ADD" => "add", "SUB" => "sub", "MUL" => "mul", "AND" => "and",
-        "SHR" => "shr", "INC" => "inc", "DEC" => "dec", "JMP" => "jmp", "JZ" => "jz",
-        "JE" => "je", "FOR" => "for", "CALL" => "call", "RET" => "ret", "OBJ" => "obj",
+        "SHR" => "shr", "INC" => "inc", "DEC" => "dec",
+        "FOR" => "for", "CALL" => "call", "RET" => "ret", "OBJ" => "obj",
         "GET" => "get", "SET" => "set", "ARR" => "arr", "CLONE" => "clone", "CAST" => "cast",
         "MACRO" => "macro", "TENSOR" => "tensor", "SETV" => "setv", "GETV" => "getv",
         "STR" => "str", "CAT" => "cat", "FMT" => "fmt", "BUF" => "buf", "BUFCOPY" => "bufcopy",
@@ -1059,6 +1069,8 @@ pub fn text_mnemonic(idx: usize) -> &'static str {
         "JSON" => "json", "UNJSON" => "unjson", "ITER" => "iter", "NEXT" => "next",
         "COLLECT" => "collect", "IMAP" => "imap", "IFILTER" => "ifilter", "FEMIT" => "femit",
         "TRY" => "try", "RETRY" => "retry", "SPAWN" => "spawn",
+        "ATOI" => "atoi", "ATOF" => "atof", "ITOA" => "itoa", "FTOA" => "ftoa",
+        "ENTRY" => "entry",
         other => other, // "~NN" retired placeholders: never a valid source token
     }
 }
@@ -1247,6 +1259,10 @@ impl TextLexer {
             if let Some(name) = tok.strip_suffix(':') {
                 if !name.is_empty() && name != "'" {
                     self.pos += 1;
+                    if name == "entry" {
+                        out.push(Tok::Entry);
+                        continue;
+                    }
                     if is_reserved(name) {
                         self.err(&format!("label {} is a reserved word", name));
                     }
@@ -1282,10 +1298,7 @@ impl TextLexer {
                 "-" => out.push(Tok::Op("SUB")),
                 "*" => out.push(Tok::Op("MUL")),
                 "&" => out.push(Tok::Op("AND")),
-                "=" => {
-                    let l = self.name_token("je");
-                    out.push(Tok::Jump("JE", l));
-                }
+                "=" => self.err("= (je) removed — use if/ifelse"),
                 "pub" => out.push(Tok::Pub),
                 "use" | "export" | "extern" | "mod" => {
                     let n = self.next().unwrap_or_else(|| self.err(&format!("{} needs \"name\"", tok)));
@@ -1387,15 +1400,15 @@ impl TextLexer {
                         self.err(&format!("lit: bad operand {}", n));
                     }
                 }
-                "jmp" | "jz" | "je" | "call" => {
-                    let l = self.name_token(&tok);
-                    let op = match tok.as_str() {
-                        "jmp" => "JMP",
-                        "jz" => "JZ",
-                        "je" => "JE",
-                        _ => "CALL",
-                    };
-                    out.push(Tok::Jump(op, l));
+                "jmp" => self.err("jmp removed — use entry/if/while/for"),
+                "jz" => self.err("jz removed — use if/ifelse/while"),
+                "je" => self.err("je removed — use if/ifelse"),
+                "call" => {
+                    let l = self.name_token("call");
+                    out.push(Tok::Jump("CALL", l));
+                }
+                "entry" => {
+                    out.push(Tok::Entry);
                 }
                 "addr" => {
                     let l = self.name_token("addr");
