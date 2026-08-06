@@ -1,0 +1,2 @@
+; hello.uf — v8: bare string self-evaluates, PRINT writes it
+"hello, uflux\n"𓂎

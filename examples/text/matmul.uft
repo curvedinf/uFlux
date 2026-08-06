@@ -1,0 +1,26 @@
+; matmul.uft — text encoding: 128x128 C=A*B, checksum=2863136768
+jmp main
+fi:
+row! 128 'fe for ret
+fe:
+col! row@ 128 * col@ + ix!
+A@ ix@ row@ col@ + seti
+B@ ix@ row@ col@ - seti ret
+cr:
+row! 128 'dc for ret
+dc:
+col! 0 acc! 128 'ij for
+C@ row@ 128 * col@ + acc@ seti ret
+ij:
+j! A@ row@ 128 * j@ + idx
+B@ j@ 128 * col@ + idx
+* acc@ + acc! ret
+se:
+C@ swap idx sum@ + sum! ret
+main:
+16384 arr int A! 16384 arr int B! 16384 arr int C!
+128 'fi for
+128 'cr for
+0 sum!
+16384 'se for
+sum@ "checksum=%d\n" print

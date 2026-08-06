@@ -1,0 +1,4 @@
+; main.uf — MTU main TU: USE"m" (libm manifest) + CALL across TUs
+𓋹"m"
+𓎹𓃀𓍬"dbl=%d\n"𓂎𓂹
+𓎦.𓏄𓃀sqrt"sqrt=%f\n"𓂎𓂹

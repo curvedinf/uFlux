@@ -1,0 +1,7 @@
+; curl.ufm — binding manifest for USE"curl" (links -lcurl)
+𓉞c"curl_easy_init"()->ptr
+𓉞c"curl_easy_setopt"(ptr,int,ptr)->int
+𓉞c"curl_easy_perform"(ptr)->int
+𓉞c"curl_easy_cleanup"(ptr)->void
+𓉞c"curl_easy_strerror"(int)->ptr
+𓉞c"curl_global_init"(int)->int

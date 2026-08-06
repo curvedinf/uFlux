@@ -1,0 +1,522 @@
+; trans.uf — C subset → µFlux (v9 text encoding) transpiler, written in µFlux
+import c"printf"(ptr,...)->int
+import c"malloc"(int)->ptr
+import c"fopen"(ptr,ptr)->ptr
+import c"fseek"(ptr,int,int)->int
+import c"ftell"(ptr)->int
+import c"fread"(ptr,int,int,ptr)->int
+import c"fclose"(ptr)->int
+import c"puts"(ptr)->int
+import c"exit"(int)->void
+import c"strlen"(ptr)->int
+import c"strcmp"(ptr,ptr)->int
+jmp main
+
+; ---------- leaf utilities (no parser recursion; named vars safe) ----------
+streq: b2! a2! a2@ b2@ call strcmp jz seq_y 0 ret seq_y: 1 ret
+die: call puts 1 call exit ret
+macro em { "%s" print drop }
+macro emn { "%d" print drop }
+tk: toks@ pi@ idx ret
+tk1: toks@ pi@ 1 + idx ret
+adv: pi@ 1 + pi! ret
+newlbl: lbl@ 1 + lbl! lbl@ ret
+macro psh { ps@ swap append ps! }
+macro spop { ps@ pop }
+macro speek { ps@ dup len 1 - idx }
+macro expect { e! call tk e@ call streq jz exf call adv }
+exf: "parse error: expected " em e@ em " got " em call tk em "\n" em call die
+
+istype: it!
+  it@ "int" call streq it@ "char" call streq + it@ "void" call streq +
+  it@ "long" call streq + it@ "short" call streq + it@ "unsigned" call streq +
+  it@ "signed" call streq + it@ "const" call streq + it@ "static" call streq +
+  ret
+
+ptype: call tk call istype call tk "*" call streq + jz pt1 call adv jmp ptype pt1: ret
+
+newvar: nv!
+  "v" fid@ "%d" fmt cat nv2!
+  fid@ 1 + fid!
+  vars@ nv@ nv2@ dput
+  nv2@ ret
+
+findvar: nv!
+  vars@ nv@ dget jz fvno
+  ret
+fvno: drop "undefined variable: " em nv@ em "\n" em call die
+
+; trymatch: pat → match length at pos, or -1 (regex anchored with ^)
+trymatch: tm_pat!
+  src@ pos@ srclen@ slice tm_pat@ rx jz tm_no
+  0 idx call strlen ret
+tm_no: drop -1 ret
+
+; ---------- lexer ----------
+lex_one:
+  pos@ srclen@ - jz le0
+  "^[ \t\n\r]+" call trymatch dup -1 - jz lw0
+  pos@ + pos! jmp lex_one
+lw0: drop
+  src@ pos@ srclen@ slice rest!
+  rest@ "//" starts jz lc0
+  rest@ "\n" find dup -1 - jz lc0b
+  pos@ + 1 + pos! jmp lex_one
+lc0b: drop srclen@ pos! jmp lex_one
+lc0:
+  rest@ "/*" starts jz lc1
+  rest@ "*/" find dup -1 - jz lc1
+  pos@ + 2 + pos! jmp lex_one
+lc1:
+  rest@ "#" starts jz lc2
+  rest@ "\n" find dup -1 - jz lc2
+  pos@ + 1 + pos! jmp lex_one
+lc2:
+  "^\"([^\"\\\\]|\\\\.)*\"" call trymatch dup -1 - jz lt1
+  jmp ltok
+lt1: drop
+  "^'([^'\\\\]|\\\\.)*'" call trymatch dup -1 - jz lt2
+  jmp ltok
+lt2: drop
+  "^(0[xX][0-9a-fA-F]+|[0-9]+)" call trymatch dup -1 - jz lt3
+  jmp ltok
+lt3: drop
+  "^[A-Za-z_][A-Za-z0-9_]*" call trymatch dup -1 - jz lt4
+  jmp ltok
+lt4: drop
+  "^(<<=|>>=|==|!=|<=|>=|&&|\\|\\||\\+\\+|--|\\+=|-=|\\*=|/=|%=|<<|>>)" call trymatch dup -1 - jz lt5
+  jmp ltok
+lt5: drop
+  1 ln!
+  jmp lput
+ltok:
+  ln!
+lput:
+  src@ pos@ pos@ ln@ + slice toks@ swap append toks!
+  pos@ ln@ + pos!
+  1 ret
+le0: 0 ret
+
+; ---------- expression parser (recursive: temps on data stack / ps only) ----------
+pexpr: jmp passign
+
+passign:
+  vars@ call tk dget jz pal2
+  psh
+  call tk1 psh
+  speek "=" call streq speek "+=" call streq + speek "-=" call streq +
+  speek "*=" call streq + speek "/=" call streq + speek "%=" call streq + jz pan
+  speek "/=" call streq speek "%=" call streq + jz paok
+  "no division in subset" call die
+paok:
+  speek "=" call streq jz pac
+  call adv call adv
+  call passign
+  "dup " em
+  spop drop
+  spop "%s!\n" print drop
+  ret
+pac:
+  call adv call adv
+  ps@ dup len 2 - idx "%s@ " print drop
+  call passign
+  speek 0 1 slice em " dup " em
+  spop drop
+  spop "%s!\n" print drop
+  ret
+pan:
+  spop drop spop drop
+  jmp pal
+pal2: drop
+pal: jmp plor
+
+plor: call pland
+  plorl: call tk "||" call streq jz plord
+  call adv call pland "call lor " em jmp plorl
+plord: ret
+
+pland: call peq
+  plandl: call tk "&&" call streq jz plandd
+  call adv call peq "call land " em jmp plandl
+plandd: ret
+
+peq: call prel
+  peql: call tk "==" call streq jz peq1
+  call adv call prel "call eq " em jmp peql
+peq1: call tk "!=" call streq jz peqd
+  call adv call prel "call ne " em jmp peql
+peqd: ret
+
+prel: call padd
+  prell: call tk "<" call streq jz pr1
+  call adv call padd "call lt " em jmp prell
+pr1: call tk "<=" call streq jz pr2
+  call adv call padd "call le " em jmp prell
+pr2: call tk ">" call streq jz pr3
+  call adv call padd "call gt " em jmp prell
+pr3: call tk ">=" call streq jz prd
+  call adv call padd "call ge " em jmp prell
+prd: ret
+
+padd: call pmul
+  paddl: call tk "+" call streq jz pa1
+  call adv call pmul "+ " em jmp paddl
+pa1: call tk "-" call streq jz paddd
+  call adv call pmul "- " em jmp paddl
+paddd: ret
+
+pmul: call punary
+  pmull: call tk "*" call streq jz pm1
+  call adv call punary "* " em jmp pmull
+pm1: call tk "/" call streq call tk "%" call streq + jz pm2
+  "no division in subset" call die
+pm2: ret
+
+punary: call tk "-" call streq jz pu1
+  call adv "0 " em call punary "- " em ret
+pu1: call tk "!" call streq jz pu2
+  call adv call punary "call lnot " em ret
+pu2: call tk "~" call streq jz pu3
+  call adv call punary "-1 swap - " em ret
+pu3: call tk "+" call streq jz pu4
+  call adv jmp punary
+pu4: call tk "++" call streq jz pu5
+  call adv vars@ call tk dget jz puv4
+  call adv
+  dup "%s@ 1 + dup %s! " print drop
+  ret
+puv4: "++ needs a variable" call die
+pu5: call tk "--" call streq jz pu6
+  call adv vars@ call tk dget jz puv5
+  call adv
+  dup "%s@ 1 - dup %s! " print drop
+  ret
+puv5: "-- needs a variable" call die
+pu6: jmp ppost
+
+ppost: "" lasts!
+  call pprim
+  ppl: call tk "++" call streq jz pp1
+  lasts@ "" call streq jz ppk1 "postfix ++ needs a variable" call die
+ppk1: call adv lasts@ dup "%s@ 1 + %s! " print drop jmp ppl
+pp1: call tk "--" call streq jz pp2
+  lasts@ "" call streq jz ppk2 "postfix -- needs a variable" call die
+ppk2: call adv lasts@ dup "%s@ 1 - %s! " print drop jmp ppl
+pp2: ret
+
+pprim: call tk ptk!
+  ptk@ "[0-9]*" glob jz pp_n1
+  ptk@ "^(0[xX][0-9a-fA-F]+|[0-9]+)" rx drop 0 idx em " " em call adv ret
+pp_n1: ptk@ "'" starts jz pp_n2
+  ptk@ 1 ptk@ call strlen 1 - slice ci!
+  ci@ "\\" starts jz pc_lit
+  ci@ "\\n" call streq jz pc1 10 emn jmp pce
+pc1: ci@ "\\t" call streq jz pc2 9 emn jmp pce
+pc2: ci@ "\\r" call streq jz pc3 13 emn jmp pce
+pc3: ci@ "\\0" call streq jz pc4 0 emn jmp pce
+pc4: ci@ "\\\\" call streq jz pc5 92 emn jmp pce
+pc5: ci@ "\\'" call streq jz pc6 39 emn jmp pce
+pc6: "bad char escape" call die
+pc_lit: ci@ loadx 255 and emn
+pce: " " em call adv ret
+pp_n2: ptk@ "\"" starts jz pp_n3
+  ptk@ em " " em call adv ret
+pp_n3: ptk@ "(" call streq jz pp_n4
+  call adv call pexpr ")" expect "" lasts! ret
+pp_n4: ptk@ "argc" call streq jz pp_n5
+  call adv "extern \"uf_argc\" loadx " em "" lasts! ret
+pp_n5: ptk@ "argv" call streq jz pp_n6
+  call adv "[" expect call pexpr "]" expect
+  "extern \"uf_argv\" loadx swap 8 * + loadx " em "" lasts! ret
+pp_n6: ptk@ "__byte" call streq jz pp_n7
+  call adv "(" expect call pexpr ")" expect
+  "loadx 255 and " em "" lasts! ret
+pp_n7: ptk@ "NULL" call streq jz pp_n8
+  call adv "0 " em "" lasts! ret
+pp_n8: ptk@ "EOF" call streq jz pp_n9
+  call adv "-1 " em "" lasts! ret
+pp_n9: call tk1 "(" call streq jz pp_var
+  ptk@ psh
+  call adv call adv
+  call tk ")" call streq jz pargs
+  jmp pae
+pargs: call pexpr
+  pargl: call tk "," call streq jz pae
+  call adv call pexpr jmp pargl
+pae: ")" expect
+  spop "call %s " print drop
+  "" lasts! ret
+pp_var: call tk1 "[" call streq jz pp_v2
+  vars@ ptk@ dget jz puvv
+  psh
+  call adv call adv
+  call pexpr
+  "]" expect
+  spop "%s@ + loadx 255 and " print drop
+  "" lasts! ret
+pp_v2: vars@ ptk@ dget jz puvv2
+  dup lasts!
+  "%s@ " print drop
+  call adv ret
+puvv: "unknown array variable" call die
+puvv2: drop "undefined variable: " em ptk@ em "\n" em call die
+
+; ---------- statements ----------
+pstmt: call tk call istype jz ps0
+  call ptype
+  call tk nv! call adv
+  nv@ call newvar slot!
+  call tk "=" call streq jz pd1
+  call adv
+  slot@ psh
+  call passign
+  spop slot2!
+  slot2@ "%s!\n" print drop
+pd1: call tk "," call streq jz pd3
+  call adv
+  call tk nv! call adv
+  nv@ call newvar slot!
+  call tk "=" call streq jz pd1
+  call adv
+  slot@ psh
+  call passign
+  spop slot2!
+  slot2@ "%s!\n" print drop
+  jmp pd1
+pd3: ";" expect ret
+
+ps0: call tk "return" call streq jz ps1
+  call adv call pexpr ";" expect
+  inmain@ jz prn
+  "call exit\n" em ret
+prn: "ret\n" em ret
+
+ps1: call tk "if" call streq jz ps2
+  call adv "(" expect call pexpr ")" expect
+  call newlbl psh
+  speek "jz L%d\n" print drop
+  call pstmt
+  call tk "else" call streq jz pi_no
+  call adv
+  call newlbl psh
+  speek "jmp L%d\n" print drop
+  ps@ dup len 2 - idx "L%d:\n" print drop
+  call pstmt
+  spop "L%d:\n" print drop
+  spop drop
+  jmp pidone
+pi_no: spop "L%d:\n" print drop
+pidone: ret
+
+ps2: call tk "while" call streq jz ps3
+  call adv
+  call newlbl psh
+  call newlbl psh
+  ps@ dup len 2 - idx cnts@ swap append cnts!
+  speek brks@ swap append brks!
+  ps@ dup len 2 - idx "L%d:\n" print drop
+  "(" expect call pexpr ")" expect
+  speek "jz L%d\n" print drop
+  call pstmt
+  ps@ dup len 2 - idx "jmp L%d\n" print drop
+  speek "L%d:\n" print drop
+  spop drop spop drop
+  brks@ pop drop cnts@ pop drop
+  ret
+
+ps3: call tk "for" call streq jz ps4
+  call adv "(" expect
+  call tk ";" call streq jz pf_i
+  call adv jmp pf_ic
+pf_i: call tk call istype jz pf_ie
+  call ptype
+  call tk nv! call adv
+  nv@ call newvar slot!
+  "=" expect
+  slot@ psh
+  call passign
+  spop slot2!
+  slot2@ "%s!\n" print drop
+  ";" expect jmp pf_ic
+pf_ie: call pexpr "drop\n" em ";" expect
+pf_ic: call newlbl psh
+  call newlbl psh
+  call newlbl psh
+  ps@ dup len 2 - idx brks@ swap append brks!
+  speek cnts@ swap append cnts!
+  ps@ dup len 3 - idx "L%d:\n" print drop
+  call tk ";" call streq jz pf_c
+  "1 " em jmp pf_cd
+pf_c: call pexpr
+pf_cd: ps@ dup len 2 - idx "jz L%d\n" print drop
+  ";" expect
+  pi@ psh
+  1 pfd!
+pf_s: pfd@ jz pf_sd
+  call tk "(" call streq jz pf_s1 pfd@ 1 + pfd!
+pf_s1: call tk ")" call streq jz pf_s1b pfd@ 1 - pfd!
+pf_s1b: pfd@ jz pf_sd
+  pi@ 1 + pi!
+  jmp pf_s
+pf_sd: ")" expect
+  call pstmt
+  pi@ psh
+  ps@ dup len 3 - idx "L%d:\n" print drop
+  ps@ dup len 2 - idx pi!
+  call pexpr "drop\n" em
+  spop pi!
+  spop drop
+  ps@ dup len 3 - idx "jmp L%d\n" print drop
+  ps@ dup len 2 - idx "L%d:\n" print drop
+  spop drop spop drop spop drop
+  brks@ pop drop cnts@ pop drop
+  ret
+
+ps4: call tk "do" call streq jz ps5
+  call adv
+  call newlbl psh
+  call newlbl psh
+  call newlbl psh
+  speek brks@ swap append brks!
+  ps@ dup len 2 - idx cnts@ swap append cnts!
+  ps@ dup len 3 - idx "L%d:\n" print drop
+  call pstmt
+  "while" expect "(" expect
+  ps@ dup len 2 - idx "L%d:\n" print drop
+  call pexpr
+  ")" expect ";" expect
+  speek "jz L%d\n" print drop
+  ps@ dup len 3 - idx "jmp L%d\n" print drop
+  speek "L%d:\n" print drop
+  spop drop spop drop spop drop
+  brks@ pop drop cnts@ pop drop
+  ret
+
+ps5: call tk "break" call streq jz ps6
+  call adv ";" expect
+  brks@ len jz pbok
+  brks@ dup len 1 - idx "jmp L%d\n" print drop
+  ret
+pbok: "break outside loop" call die
+
+ps6: call tk "continue" call streq jz ps7
+  call adv ";" expect
+  cnts@ len jz pcok
+  cnts@ dup len 1 - idx "jmp L%d\n" print drop
+  ret
+pcok: "continue outside loop" call die
+
+ps7: call tk "{" call streq jz ps8
+  call adv
+psb: call tk "}" call streq jz psb2
+  call adv ret
+psb2: call pstmt jmp psb
+
+ps8: call tk ";" call streq jz ps9
+  call adv ret
+
+ps9: call pexpr "drop\n" em ";" expect ret
+
+; ---------- functions / program ----------
+pfunc:
+  call ptype
+  call tk fname! call adv
+  "(" expect
+  list pl!
+pfp: call tk ")" call streq jz pfp1
+  jmp pfq
+pfp1: call tk "," call streq jz pfp2
+  call adv jmp pfp
+pfp2: call tk call istype call tk "*" call streq + jz pfp3
+  call adv jmp pfp
+pfp3: pl@ call tk append pl!
+  call adv jmp pfp
+pfq: call adv
+  dict vars!
+  fname@ "%s:\n" print drop
+  fname@ "main" call streq inmain!
+  pl@ len 1 - pfi!
+pfpl: pfi@ -1 - jz pfpd
+  pl@ pfi@ idx nv!
+  nv@ call newvar "%s!\n" print drop
+  pfi@ 1 - pfi!
+  jmp pfpl
+pfpd: "{" expect
+pfb: call tk "}" call streq jz pfb2
+  call adv
+  inmain@ jz pfr
+  "0 call exit\n" em jmp pfret
+pfr: "0 ret\n" em
+pfret: ret
+pfb2: call pstmt jmp pfb
+
+pprog: pi@ nt@ - jz ppd
+  call pfunc
+  jmp pprog
+ppd: ret
+
+; ---------- main ----------
+main:
+  extern "uf_argc" loadx 2 - jz argok
+  "usage: trans file.c" call die
+argok:
+  extern "uf_argv" loadx 8 + loadx path!
+  path@ "r" call fopen f!
+  f@ jz ffail
+  jmp fopenok
+ffail: "cannot open input" call die
+fopenok:
+  f@ 0 2 call fseek drop
+  f@ call ftell srclen!
+  f@ 0 0 call fseek drop
+  srclen@ 16 + buf src!
+  src@ 1 srclen@ f@ call fread drop
+  f@ call fclose drop
+  list toks!
+  0 pos!
+lexl: call lex_one jz lexd
+  jmp lexl
+lexd:
+  toks@ len nt!
+  0 pi! 0 lbl! 0 fid! 0 inmain!
+  list brks! list cnts! list ps!
+  ; ---- preamble of the generated program ----
+  "import c\"printf\"(ptr,...)->int\n" em
+  "import c\"malloc\"(int)->ptr\n" em
+  "import c\"free\"(ptr)->void\n" em
+  "import c\"puts\"(ptr)->int\n" em
+  "import c\"putchar\"(int)->int\n" em
+  "import c\"getchar\"()->int\n" em
+  "import c\"fputs\"(ptr,ptr)->int\n" em
+  "import c\"fwrite\"(ptr,int,int,ptr)->int\n" em
+  "import c\"strlen\"(ptr)->int\n" em
+  "import c\"strcmp\"(ptr,ptr)->int\n" em
+  "import c\"strncmp\"(ptr,ptr,int)->int\n" em
+  "import c\"strcpy\"(ptr,ptr)->ptr\n" em
+  "import c\"strcat\"(ptr,ptr)->ptr\n" em
+  "import c\"exit\"(int)->void\n" em
+  "import c\"fopen\"(ptr,ptr)->ptr\n" em
+  "import c\"fclose\"(ptr)->int\n" em
+  "import c\"fgetc\"(ptr)->int\n" em
+  "extern \"stdout\"\n" em
+  "jmp main\n" em
+  "eq: je eqy\n0 ret\neqy: 1 ret\n" em
+  "ne: je nen\n1 ret\nnen: 0 ret\n" em
+  "lt: - " em
+  "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em
+  "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em
+  "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em
+  "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em
+  "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em
+  "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em
+  "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em
+  "shr " em "shr " em "shr " em "shr " em "shr " em "shr " em "shr ret\n" em
+  "le: swap call lt 1 swap - ret\n" em
+  "gt: swap call lt ret\n" em
+  "ge: call lt 1 swap - ret\n" em
+  "lnot: jz lny\n0 ret\nlny: 1 ret\n" em
+  "nz: jz nzz\n1 ret\nnzz: 0 ret\n" em
+  "land: call nz swap call nz and ret\n" em
+  "lor: call nz swap call nz + call nz ret\n" em
+  call pprog
+  0 call exit

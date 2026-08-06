@@ -1,0 +1,17 @@
+; c.ufm — binding manifest for USE"c" (links -lc)
+𓉞c"printf"(ptr,...)->int
+𓉞c"puts"(ptr)->int
+𓉞c"putchar"(int)->int
+𓉞c"fprintf"(ptr,ptr,...)->int
+𓉞c"sprintf"(ptr,ptr,...)->int
+𓉞c"malloc"(int)->ptr
+𓉞c"calloc"(int,int)->ptr
+𓉞c"realloc"(ptr,int)->ptr
+𓉞c"free"(ptr)->void
+𓉞c"memcpy"(ptr,ptr,int)->ptr
+𓉞c"memset"(ptr,int,int)->ptr
+𓉞c"memmove"(ptr,ptr,int)->ptr
+𓉞c"strlen"(ptr)->int
+𓉞c"strcmp"(ptr,ptr)->int
+𓉞c"strcpy"(ptr,ptr)->ptr
+𓉞c"exit"(int)->void

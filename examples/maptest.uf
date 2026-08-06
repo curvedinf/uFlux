@@ -1,0 +1,4 @@
+; maptest.uf — v9: word-frequency count with DICT/DGET/DPUT
+𓊵𓍣!
+𓍣@"a"𓍣@"a"𓂁*𓎥+𓂂𓍣@"b"𓍣@"b"𓂁*𓎥+𓂂𓍣@"a"𓍣@"a"𓂁*𓎥+𓂂𓍣@"c"𓍣@"c"𓂁*𓎥+𓂂𓍣@"a"𓍣@"a"𓂁*𓎥+𓂂𓍣@"b"𓍣@"b"𓂁*𓎥+𓂂
+𓍣@"a"𓂁𓂹"a=%d\n"𓂎𓍣@"b"𓂁𓂹"b=%d\n"𓂎𓍣@"c"𓂁𓂹"c=%d\n"𓂎

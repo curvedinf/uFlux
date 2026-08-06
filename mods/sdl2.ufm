@@ -1,0 +1,7 @@
+; sdl2.ufm — binding manifest for USE"sdl2" (links -lsdl2)
+𓉞c"SDL_Init"(int)->int
+𓉞c"SDL_CreateWindow"(ptr,int,int,int,int,int)->ptr
+𓉞c"SDL_DestroyWindow"(ptr)->void
+𓉞c"SDL_Quit"()->void
+𓉞c"SDL_Delay"(int)->void
+𓉞c"SDL_GetError"()->ptr
