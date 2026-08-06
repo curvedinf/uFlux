@@ -3,3 +3,8 @@ comp/target/
 
 # uflux compiler cache
 /tmp/uflux-cache/
+
+# benchmark data and artifacts
+bench/data/
+bench/results/
+.bench-venv/

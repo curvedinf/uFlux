@@ -342,7 +342,7 @@ pub fn emit_range(
                      K_WT_{}{}:;cx->loops[fr].cont=&&K_WT_{}{};cx->loops[fr].end=&&K_WE_{}{};\n\
                      cx->cs[cx->csp++]=&&K_WC_{}{};goto *cnd;K_WC_{}{}:;\n\
                      if(uf_zero(pop(cx)))goto K_WE_{}{};\n\
-                     cx->cs[cx->csp++]=&&K_WB_{}{};goto *bod;K_WB_{}{}:;\n\
+                     cx->cs[cx->csp++]=&&K_WB_{}{};goto *bod;K_WB_{}{}:;pop(cx);\n\
                      goto K_WT_{}{};\n\
                      K_WE_{}{}:;cx->lsp=fr;}}\n",
                     prefix, i, prefix, i, prefix, i,

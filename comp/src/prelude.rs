@@ -86,7 +86,7 @@ static void uf_gc_set_grow(void){
   uint64_t oc=uf_gc_setcap; void** os=uf_gc_set;
   uf_gc_setcap = oc? oc*2 : 1024; uf_gc_setlen = 0;
   uf_gc_set = (void**)calloc(uf_gc_setcap, sizeof(void*)); if(!uf_gc_set)die("out of memory");
-  for(uint64_t i=0;i<oc;i++) if(os[i]) uf_gc_set_insert(os[i]);
+  for(uint64_t i=0;i<oc;i++) if(os[i]&&os[i]!=(void*)1) uf_gc_set_insert(os[i]);
   free(os);
 }
 static void uf_gc_set_insert(void* p){
@@ -153,26 +153,29 @@ static void uf_gc_free_obj(Hdr* h){
 static void uf_gc_collect(void){
   pthread_mutex_lock(&uf_gc_mu);
   uint64_t start_seq = uf_gc_seq;
-  /* mark: variables, every registered Ctx stack, tmp builder roots, weave results */
   for(long i=0;i<uf_nvar_roots;i++) uf_mark_cell(*uf_var_roots[i]);
   int nc = uf_nctxs;
   for(int i=0;i<nc;i++){ Ctx* c=uf_ctxs[i]; for(long s=0;s<c->sp;s++) uf_mark_cell(c->ds[s]); }
   int nt = uf_ntmp; if(nt>UF_MAXTMP)nt=UF_MAXTMP;
   for(int i=0;i<nt;i++){ void** pp=uf_tmp_roots[i]; if(pp&&*pp) uf_mark_ptr(*pp); }
   if(uf_active_job) uf_weave_mark(uf_active_job);
-  /* sweep: free unmarked, unpinned objects older than this collection */
   void** pp = &uf_gc_list; uint64_t live=0;
   while(*pp){
     Hdr* h=(Hdr*)*pp;
     if(!(h->gc_flags&GCF_MARK) && !(h->gc_flags&GCF_PINNED) && ((h->gc_flags>>GCF_SEQSHIFT) < start_seq)){
-      *pp = h->gc_next; uf_gc_set_remove((void*)h); uf_gc_free_obj(h);
+      *pp = h->gc_next; uf_gc_free_obj(h);
     } else {
-      h->gc_flags &= ~(uint64_t)GCF_MARK; pp = &h->gc_next;
+      h->gc_flags &= ~(uint64_t)GCF_MARK; pp = &h->gc_next; live++;
     }
   }
-  for(uint64_t i=0;i<uf_gc_setcap;i++) if(uf_gc_set[i]&&uf_gc_set[i]!=(void*)1) live++;
+  /* rebuild set from scratch (live objects only) to clear tombstones */
+  if(uf_gc_set){ free(uf_gc_set); }
+  uf_gc_setcap = live*2+16; if(uf_gc_setcap<1024)uf_gc_setcap=1024;
+  uf_gc_set = (void**)calloc(uf_gc_setcap, sizeof(void*)); if(!uf_gc_set)die("out of memory");
+  uf_gc_setlen = 0;
+  for(void*p=uf_gc_list;p;p=((Hdr*)p)->gc_next) uf_gc_set_insert(p);
   uf_gc_live = live; uf_gc_bytes_since = 0;
-  uint64_t t2 = uf_gc_live*256; /* ~2x live bytes, objects ~128B avg */
+  uint64_t t2 = uf_gc_live*256;
   uf_gc_threshold = (1<<20) > t2 ? (1<<20) : t2;
   pthread_mutex_unlock(&uf_gc_mu);
 }
@@ -237,7 +240,7 @@ static inline int uf_ceq(Cell a,Cell b){ return (a.tag==T_FLOAT||b.tag==T_FLOAT)
    from IMPORTed C functions is still accepted (legacy ptr) ---- */
 static int uf_is_str(Cell c){ if(c.tag!=T_PTR||!c.i)return 0; Hdr*h=uf_gc_find((void*)c.i); return h&&h->tag==HT_STR; }
 static const char* uf_sbytes(Str*s){ return s->mlen?s->mdata:s->data; }
-static const char* uf_sptr(Cell c){ if(c.tag==T_PTR&&c.i){ Hdr*h=uf_gc_find((void*)c.i); if(h&&h->tag==HT_STR){ Str*s=(Str*)h; return s->mlen?s->mdata:s->data; } if(h&&h->tag==HT_BUF){ return h->data; } } return (const char*)c.i; }
+static const char* uf_sptr(Cell c){ if(c.tag==T_PTR&&c.i){ Hdr*h=uf_gc_find((void*)c.i); if(h&&h->tag==HT_STR){ Str*s=(Str*)h; return s->mlen?s->mdata:s->data; } if(h&&h->tag==HT_BUF){ return h->data; } } if(c.tag==T_INT&&c.i>(int64_t)65536) return (const char*)c.i; /* FFI raw char* */ if(c.tag==T_INT&&!c.i) return (const char*)0; die("expected string, got non-pointer cell"); }
 static int64_t uf_slen(Cell c){ if(c.tag==T_PTR&&c.i){ Hdr*h=uf_gc_find((void*)c.i); if(h&&h->tag==HT_STR)return (int64_t)h->len; } return (int64_t)strlen((const char*)c.i); }
 static Cell uf_str_new(const char* s, size_t n){
   Str* r=(Str*)uf_gc_alloc(sizeof(Str)+n+1,0);
