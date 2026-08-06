@@ -1,38 +1,13 @@
 fl:
-ln! drop
-ln@ " " find sp!
-ln@ 0 sp@ slice ip!
-sc@ ip@ getq 1 + v!
-sc@ ip@ v@ set
-ln@ "[" find bp!
-bp@ 13 + hp!
-ln@ hp@ get d0!
-ln@ hp@ 1 + get d1!
-d0@ 48 - 10 * d1@ 48 - + hr!
-hrs@ hr@ getq 1 + hv!
-hrs@ hr@ hv@ set
-ln@ "1.1\" " find qp!
-qp@ 5 + p1!
-ln@ p1@ get sb!
-sb@ 48 - cls!
-sd@ cls@ getq 1 + sv!
-sd@ cls@ sv@ set
-ln@ len ell!
-ln@ p1@ ell@ slice rest!
-rest@ " " find sp2!
-sp2@ 1 + bp2!
-0 by!
-rest@ bp2@ getq ch!
-'bcond 'bbody while
+drop drop
+3 fget ":" split 1 get hr!
+hrs@ hr@ 1 addto
+sc@ 0 fcount
+8 fget 0 get 48 - cls!
+sd@ cls@ fcount
+9 fatoi by!
 tb@ by@ + tb!
 tl@ 1 + tl!
-0 ret
-bcond:
-ch@ 48 lt ch@ 57 gt or not ret
-bbody:
-by@ 10 * ch@ 48 - + by!
-bp2@ 1 + bp2!
-rest@ bp2@ getq ch!
 0 ret
 mkp:
 ipk! ipcnt!
@@ -61,7 +36,7 @@ dict hrs!
 dict sd!
 "bench/data/access.log" p!
 argv len 1 gt 'useargv if
-p@ 0 'fl ffold drop
+p@ " " 0 'fl fsplit drop
 "=== LOG EXTRACTION RESULTS ===\n" print drop
 tl@ "total_lines: %d\n" print
 tb@ "total_bytes: %d\n" print

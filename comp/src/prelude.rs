@@ -27,7 +27,7 @@ pub const PRELUDE: &str = r#"
    4 void, 5 arr, 6 tensor, 7 list, 8 dict, 9 str, 10 chan, 11 atom,
    12 buf, 13 obj, 14 bitmap, 15 time, 16 dur, 17 bloom, 18 iter */
 enum { T_INT=0, T_FLOAT=1, T_PTR=2, T_BYTE=3, T_TIME=15, T_DUR=16 };
-enum { HT_ARR=5, HT_TENSOR=6, HT_DYN=7, HT_MAP=8, HT_STR=9, HT_RING=10, HT_ATOM=11, HT_BUF=12, HT_OBJ=13, HT_BITMAP=14, HT_BLOOM=17, HT_ITER=18 };
+enum { HT_ARR=5, HT_TENSOR=6, HT_DYN=7, HT_MAP=8, HT_STR=9, HT_RING=10, HT_ATOM=11, HT_BUF=12, HT_OBJ=13, HT_BITMAP=14, HT_BLOOM=17, HT_ITER=18, HT_SET=19 };
 typedef struct { int tag; int64_t i; } Cell;
 
 /* GC header prefix shared by every tagged object: gc_next links the global
@@ -93,17 +93,41 @@ static void uf_gc_set_grow(void){
   for(uint64_t i=0;i<oc;i++) if(os[i]&&os[i]!=(void*)1) uf_gc_set_insert(os[i]);
   free(os);
 }
+/* fast inline hash for pointer → set slot */
+static inline uint64_t uf_gc_hash(void* p){
+  return (((uint64_t)p >> 4) * 11400714819323198485ULL >> 32) % uf_gc_setcap;
+}
 static void uf_gc_set_insert(void* p){
   if((uf_gc_setlen+1)*10 >= uf_gc_setcap*7) uf_gc_set_grow();
-  uint64_t i = ((uint64_t)p >> 4) * 11400714819323198485ULL >> 32; i %= uf_gc_setcap;
+  uint64_t i = uf_gc_hash(p);
+  while(uf_gc_set[i] && uf_gc_set[i]!=p) i=(i+1)%uf_gc_setcap;
+  if(!uf_gc_set[i]){ uf_gc_set[i]=p; uf_gc_setlen++; }
+}
+/* fast-path insert for uf_gc_alloc: check load factor, then direct slot write */
+static void uf_gc_set_insert_fast(void* p){
+  if((uf_gc_setlen+1)*10 >= uf_gc_setcap*7) uf_gc_set_grow();
+  uint64_t i = uf_gc_hash(p);
+  if(__builtin_expect(!uf_gc_set[i],1)){ uf_gc_set[i]=p; uf_gc_setlen++; return; }
+  if(uf_gc_set[i]==p) return;
   while(uf_gc_set[i] && uf_gc_set[i]!=p) i=(i+1)%uf_gc_setcap;
   if(!uf_gc_set[i]){ uf_gc_set[i]=p; uf_gc_setlen++; }
 }
 static Ctx main_cx_store; /* fwd: defined fully below */
-static Hdr* uf_gc_find(void* p){
-  if(!p || !uf_gc_setcap || p==(void*)1) return 0;
+/* uf_gc_find inline cache: 4-entry LRU of recently validated pointers.
+   Hot loops access the same 1-3 dict handles millions of times;
+   the cache eliminates the hash+probe for these repeat lookups. */
+static _Thread_local void* uf_gc_cache[4] = {0,0,0,0};
+static inline Hdr* uf_gc_find(void* p){
+  if(!p || p==(void*)1) return 0;
+  /* inline cache: check 4 recently-seen pointers */
+  if(p==uf_gc_cache[0]||p==uf_gc_cache[1]||p==uf_gc_cache[2]||p==uf_gc_cache[3]) return (Hdr*)p;
+  if(!uf_gc_setcap) return 0;
   uint64_t i = ((uint64_t)p >> 4) * 11400714819323198485ULL >> 32; i %= uf_gc_setcap;
-  while(uf_gc_set[i]){ if(uf_gc_set[i]==p) return (Hdr*)p; i=(i+1)%uf_gc_setcap; }
+  while(uf_gc_set[i]){ if(uf_gc_set[i]==p){
+    /* cache miss → insert: shift down, put new entry at slot 0 */
+    uf_gc_cache[3]=uf_gc_cache[2]; uf_gc_cache[2]=uf_gc_cache[1]; uf_gc_cache[1]=uf_gc_cache[0]; uf_gc_cache[0]=p;
+    return (Hdr*)p;
+  } i=(i+1)%uf_gc_setcap; }
   return 0;
 }
 /* context registry: every Ctx's data stack is a precise root set */
@@ -131,6 +155,7 @@ static void uf_mark_obj(Hdr* h){
   switch(h->tag){
     case HT_DYN: { Dyn* d=(Dyn*)h; for(uint64_t i=0;i<d->len;i++) uf_mark_cell(d->data[i]); break; }
     case HT_MAP: { Map* m=(Map*)h; for(uint64_t i=0;i<m->cap;i++) if(m->st[i]==1){ uf_mark_cell(m->keys[i]); uf_mark_cell(m->vals[i]); } break; }
+    case HT_SET: { Map* m=(Map*)h; for(uint64_t i=0;i<m->cap;i++) if(m->st[i]==1) uf_mark_cell(m->keys[i]); break; }
     case HT_RING: { Ring* r=(Ring*)h; for(uint64_t j=0;j<r->len;j++) uf_mark_cell(r->buf[(r->head+j)%r->cap]); break; }
     case HT_OBJ: { uint64_t n=h->esz/8; Cell* f=(Cell*)h->data; for(uint64_t i=0;i<n;i++) uf_mark_cell(f[i]); break; }
     case HT_ITER: { Iter* it=(Iter*)h; uf_mark_cell(it->src); uf_mark_cell(it->f); uf_mark_cell(it->g); break; }
@@ -141,7 +166,7 @@ struct WeaveJobS; static struct WeaveJobS* uf_active_job;
 static void uf_weave_mark(struct WeaveJobS* j);
 static void uf_gc_free_obj(Hdr* h){
   switch(h->tag){
-    case HT_MAP: { Map* m=(Map*)h; free(m->keys); free(m->vals); free(m->st); break; }
+    case HT_MAP: case HT_SET: { Map* m=(Map*)h; free(m->keys); free(m->vals); free(m->st); break; }
     case HT_RING: { Ring* r=(Ring*)h; pthread_mutex_destroy(&r->mu); pthread_cond_destroy(&r->notfull); pthread_cond_destroy(&r->notempty); free(r->buf); break; }
     case HT_STR: { Str* s=(Str*)h; if(s->mlen) munmap((void*)s->mdata,(size_t)s->mlen); else if(s->gc_parent==(void*)1) free((void*)s->mdata); break; }
     default: break;
@@ -175,6 +200,8 @@ static void uf_gc_collect(void){
     while(q){ uf_gc_set_insert(q); q = ((Hdr*)q)->gc_next; }
   }
   uf_gc_bytes_since = 0;
+  /* invalidate find cache — freed objects may still be cached */
+  uf_gc_cache[0]=uf_gc_cache[1]=uf_gc_cache[2]=uf_gc_cache[3]=0;
   pthread_mutex_unlock(&uf_gc_mu);
 }
 static void* uf_gc_alloc(size_t sz, int align){
@@ -185,11 +212,11 @@ static void* uf_gc_alloc(size_t sz, int align){
   else { p=malloc(sz); }
   if(!p)die("out of memory");
   memset(p,0,sz);
-  Hdr* h=(Hdr*)p; 
+  Hdr* h=(Hdr*)p;
   h->gc_flags = ((uint64_t)atomic_fetch_add(&uf_gc_seq,1))<<GCF_SEQSHIFT;
   uf_gc_bytes_since += sz;
-  if(atomic_load(&uf_gc_mt)){ pthread_mutex_lock(&uf_gc_mu); h->gc_next=uf_gc_list; uf_gc_list=p; uf_gc_set_insert(p); pthread_mutex_unlock(&uf_gc_mu); }
-  else { h->gc_next=uf_gc_list; uf_gc_list=p; uf_gc_set_insert(p); }
+  if(atomic_load(&uf_gc_mt)){ pthread_mutex_lock(&uf_gc_mu); h->gc_next=uf_gc_list; uf_gc_list=p; uf_gc_set_insert_fast(p); pthread_mutex_unlock(&uf_gc_mu); }
+  else { h->gc_next=uf_gc_list; uf_gc_list=p; uf_gc_set_insert_fast(p); }
   return p;
 }
 /* register a static object (string literal): linked, pinned, never swept */
@@ -1692,6 +1719,136 @@ static void op_ffold(Ctx*cx){
   }
   free(line); fclose(fp);
   pushc(cx,acc);
+}
+/* FSPLIT: path sep init fn_addr -> acc
+   Streaming file read + split. Callback receives (acc, line_list) where
+   line_list is a special field-list storing offsets into the line buffer.
+   Access fields via FGET (field-list index -> str). Eliminates per-field
+   GC allocations — only the line string and field-list are GC-managed. */
+/* thread-local current fsplit state */
+static _Thread_local char* uf_fsplit_line = 0;
+static _Thread_local Hdr* uf_fsplit_parent = 0; /* GC line string for view tracing */
+static _Thread_local int64_t uf_fsplit_offsets[256];
+static _Thread_local int uf_fsplit_nfields = 0;
+static void op_fsplit(Ctx*cx){
+  Cell f=pop(cx),acc=pop(cx),sep=pop(cx),p=pop(cx);
+  FILE* fp=fopen(uf_sptr(p),"r"); if(!fp)die("FSPLIT: cannot open file");
+  const char* E=uf_sptr(sep);
+  if(!*E)die("FSPLIT: empty separator");
+  size_t el=strlen(E);
+  char* line=0; size_t ncap=0; ssize_t m;
+  while((m=getline(&line,&ncap,fp))>=0){
+    while(m>0&&(line[m-1]=='\n'||line[m-1]=='\r'))line[--m]=0;
+    /* create GC line string (owns the data, parent for fget views) */
+    Cell lc=uf_str_new(line,(size_t)m);
+    uf_fsplit_parent=uf_gc_find((void*)lc.i);
+    uf_fsplit_line=(char*)uf_sptr(lc);
+    /* record field offsets + NUL-terminate in place */
+    uf_fsplit_nfields=0;
+    char* cur=uf_fsplit_line;
+    while(uf_fsplit_nfields<128){
+      char* sp=strstr(cur,E);
+      if(!sp){
+        uf_fsplit_offsets[uf_fsplit_nfields*2]=(int64_t)(cur-uf_fsplit_line);
+        uf_fsplit_offsets[uf_fsplit_nfields*2+1]=(int64_t)strlen(cur);
+        uf_fsplit_nfields++;
+        break;
+      }
+      *sp=0;
+      uf_fsplit_offsets[uf_fsplit_nfields*2]=(int64_t)(cur-uf_fsplit_line);
+      uf_fsplit_offsets[uf_fsplit_nfields*2+1]=(int64_t)(sp-cur);
+      uf_fsplit_nfields++;
+      cur=sp+el;
+    }
+    pushc(cx,acc); pushi(cx,uf_fsplit_nfields); uf_call_addr(cx,(const void*)f.i); acc=pop(cx);
+  }
+  free(line); fclose(fp);
+  uf_fsplit_line=0; uf_fsplit_parent=0;
+  pushc(cx,acc);
+}
+/* FGET: field_index -> str (zero-copy view into current fsplit line) */
+static void op_fget(Ctx*cx){
+  int64_t idx=pop(cx).i;
+  if(idx<0||idx>=uf_fsplit_nfields)die("FGET: index out of bounds");
+  int64_t off=uf_fsplit_offsets[idx*2], len=uf_fsplit_offsets[idx*2+1];
+  Str* v=(Str*)uf_gc_alloc(sizeof(Str),0);
+  v->tag=HT_STR; v->esz=1; v->len=(uint64_t)len; v->mlen=0;
+  v->mdata=uf_fsplit_line+off; v->gc_parent=uf_fsplit_parent;
+  pushp(cx,v);
+}
+/* FATOI: field_index -> int (parse field directly from line buffer, no alloc) */
+static void op_fatoi(Ctx*cx){
+  int64_t idx=pop(cx).i;
+  if(idx<0||idx>=uf_fsplit_nfields)die("FATOI: index out of bounds");
+  pushi(cx,(int64_t)strtoll(uf_fsplit_line+uf_fsplit_offsets[idx*2],0,10));
+}
+/* FATOF: field_index -> float (parse field directly, no alloc) */
+static void op_fatof(Ctx*cx){
+  int64_t idx=pop(cx).i;
+  if(idx<0||idx>=uf_fsplit_nfields)die("FATOF: index out of bounds");
+  pushf(cx,strtod(uf_fsplit_line+uf_fsplit_offsets[idx*2],0));
+}
+/* ADDTO: dict key amount -> (dict[key] += amount; missing starts at 0) */
+static void op_addto(Ctx*cx){
+  Cell v=pop(cx),k=pop(cx),h=pop(cx); Map*m=(Map*)uf_handle(h,"ADDTO");
+  Cell cur; if(map_get(m,k,&cur)) cur=uf_cadd(cur,v); else cur=v;
+  map_put(m,k,cur);
+}
+/* FADDTO: dict field_idx amount -> (dict[field] += amount, no Str alloc)
+   Hashes the raw field from the fsplit line buffer directly against
+   stored Str keys — bypasses Cell/gc_find/Str allocation entirely. */
+static void op_faddto(Ctx*cx){
+  Cell v=pop(cx); int64_t idx=pop(cx).i; Cell h=pop(cx);
+  Map*m=(Map*)uf_handle(h,"FADDTO");
+  if(idx<0||idx>=uf_fsplit_nfields)die("FADDTO: field index out of bounds");
+  const char* fk=uf_fsplit_line+uf_fsplit_offsets[idx*2];
+  int64_t flen=uf_fsplit_offsets[idx*2+1];
+  uint64_t fh=uf_fnv(fk,(uint64_t)flen);
+  /* probe: compare raw bytes against stored Str keys */
+  uint64_t i=fh%m->cap;
+  for(;;){
+    if(m->st[i]==0) break; /* not found */
+    if(m->st[i]==1){
+      Cell ek=m->keys[i];
+      Hdr*eh=uf_gc_find((void*)ek.i);
+      if(eh&&eh->tag==HT_STR&&eh->len==(uint64_t)flen&&
+         memcmp(uf_sbytes((Str*)eh),fk,(size_t)flen)==0){
+        m->vals[i]=uf_cadd(m->vals[i],v); return; /* found: add */
+      }
+    }
+    i=(i+1)%m->cap;
+  }
+  /* not found: create Str key + insert (must alloc for dict storage) */
+  Str* sk=(Str*)uf_gc_alloc(sizeof(Str),0);
+  sk->tag=HT_STR; sk->esz=1; sk->len=(uint64_t)flen; sk->mlen=0;
+  sk->mdata=fk; sk->gc_parent=uf_fsplit_parent;
+  map_put(m,uf_mkp(sk),v);
+}
+/* FCOUNT: dict field_idx -> (dict[field] += 1, no Str alloc on repeat keys) */
+static void op_fcount(Ctx*cx){
+  int64_t idx=pop(cx).i; Cell h=pop(cx);
+  Map*m=(Map*)uf_handle(h,"FCOUNT");
+  if(idx<0||idx>=uf_fsplit_nfields)die("FCOUNT: field index out of bounds");
+  const char* fk=uf_fsplit_line+uf_fsplit_offsets[idx*2];
+  int64_t flen=uf_fsplit_offsets[idx*2+1];
+  uint64_t fh=uf_fnv(fk,(uint64_t)flen);
+  uint64_t i=fh%m->cap;
+  for(;;){
+    if(m->st[i]==0) break;
+    if(m->st[i]==1){
+      Cell ek=m->keys[i];
+      Hdr*eh=uf_gc_find((void*)ek.i);
+      if(eh&&eh->tag==HT_STR&&eh->len==(uint64_t)flen&&
+         memcmp(uf_sbytes((Str*)eh),fk,(size_t)flen)==0){
+        m->vals[i]=uf_cadd(m->vals[i],uf_mki(1)); return;
+      }
+    }
+    i=(i+1)%m->cap;
+  }
+  Str* sk=(Str*)uf_gc_alloc(sizeof(Str),0);
+  sk->tag=HT_STR; sk->esz=1; sk->len=(uint64_t)flen; sk->mlen=0;
+  sk->mdata=fk; sk->gc_parent=uf_fsplit_parent;
+  map_put(m,uf_mkp(sk),uf_mki(1));
 }
 /* FMATCH: path pat -> chan (producer thread streams matching lines, cap 64) */
 typedef struct { Ring* r; char* path; char* pat; } UfFm;

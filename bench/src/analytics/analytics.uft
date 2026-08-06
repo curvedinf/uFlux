@@ -1,23 +1,16 @@
 fl:
-ln! drop
+drop drop
 first@ not 'proc if
 0 first!
 0 ret
 proc:
-ln@ "," split c!
-c@ 2 get region!
-c@ 3 get country!
-c@ 4 get product!
-c@ 7 get atoi units!
-c@ 10 get atof total!
+7 fatoi units!
+10 fatof total!
 tr@ total@ + tr!
 tu@ units@ + tu!
-rr@ region@ getq rv!
-rr@ region@ rv@ total@ + set
-pr@ product@ getq pv!
-pr@ product@ pv@ total@ + set
-cr@ country@ getq cv!
-cr@ country@ cv@ total@ + set
+rr@ 2 total@ faddto
+pr@ 4 total@ faddto
+cr@ 3 total@ faddto
 rows@ 1 + rows!
 0 ret
 elf:
@@ -41,7 +34,7 @@ dict pr!
 dict cr!
 "bench/data/sales.csv" p!
 argv len 1 gt 'useargv if
-p@ 0 'fl ffold drop
+p@ "," 0 'fl fsplit drop
 "=== DATA ANALYTICS RESULTS ===\n" print drop
 rows@ "total_rows: %d\n" print
 tr@ "total_revenue: %.2f\n" print
