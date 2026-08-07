@@ -311,27 +311,37 @@ pub fn emit_range(
                 vflush(&mut e, &mut vstack, &mut vcache);
                 if depth < 8 {
                     if let Some(&(bs, be)) = inline_calls.get(&i) {
-                        // Inlined CALL: emit body inline in a C scope
+                        // Inlined CALL: emit body inline in a C scope.
+                        // Locals: save base, bump by inline body's frame size,
+                        // run body, restore base.
                         let inner = format!("{}C{}_", prefix, i);
-                        e.push_str("{\n");
-                        let bbe_trim = if be > bs + 1 && matches!(p.ins[be - 1], Ins::PushI(_)) { be - 1 } else { be };
-                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, suppress, ext_idx, bs, bbe_trim, &inner, depth + 1);
-                        e.push_str("}\n");
+                        let lc = p.local_counts.get(&bs).copied().unwrap_or(0);
+                        e.push_str(&format!("{{long _lb=cx->local_base;cx->local_base+={};\n", lc));
+                        // v11: don't trim trailing PushI — the caller may need
+                        // the value pushed before RET (e.g. "0 ret" convention)
+                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, suppress, ext_idx, bs, be, &inner, depth + 1);
+                        e.push_str("cx->local_base=_lb;}\n");
                         o.push_str(&e);
                         continue;
                     }
                 }
+                let target_pc = resolve(l);
+                let lc = p.local_counts.get(&target_pc).copied().unwrap_or(0);
                 e.push_str(&format!(
-                    "cx->cs[cx->csp++]=&&K_{}{};goto L_{};K_{}{}:;\n",
+                    "cx->local_frames[cx->local_fsp++]=cx->local_base;cx->local_base+={};cx->cs[cx->csp++]=&&K_{}{};goto L_{};K_{}{}:;cx->local_base=cx->local_frames[--cx->local_fsp];\n",
+                    lc,
                     prefix,
                     i,
-                    resolve(l),
+                    target_pc,
                     prefix,
                     i
                 ))
             }
             Ins::Ret => {
                 vflush(&mut e, &mut vstack, &mut vcache);
+                // v11: standard RET. The CALL path handles frame restore in the
+                // K_after_call continuation. The uf_call_addr path (try/retry/
+                // exports/callbacks) pushes a NULL return sentinel.
                 e.push_str("{if(cx->csp==0)return;{const void* r=cx->cs[--cx->csp];if(!r)return;goto *r;}}\n")
             }
             Ins::Goto(l) => {
@@ -419,6 +429,17 @@ pub fn emit_range(
                     vcache.push((v.clone(), t, false));
                 }
             }
+            // v11: local variable access via array index
+            Ins::LocalSetI(id) => {
+                let t = vpop(&mut e, &mut vstack, &mut vtmp);
+                e.push_str(&format!("cx->locals[cx->local_base+{}]={};", id, t));
+            }
+            Ins::LocalGetI(id) => {
+                vpush(&mut e, &mut vstack, &mut vtmp, format!("cx->locals[cx->local_base+{}]", id));
+            }
+            // Unresolved locals (should have been resolved by resolve_locals)
+            Ins::LocalSet(n) => panic!("unresolved local {} at pc {}", n, i),
+            Ins::LocalGet(n) => panic!("unresolved local {} at pc {}", n, i),
             Ins::Extern(name) => {
                 vflush(&mut e, &mut vstack, &mut vcache);
                 let xi = ext_idx[name.as_str()];
@@ -563,11 +584,26 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
             p.vars.iter().map(|v| format!("&var_{}", v)).collect::<Vec<_>>().join(",")
         ));
     }
+    // v11: per-label local frame sizes. We emit a flat array indexed by
+    // instruction PC (sparse, but simple and fast). uf_local_counts[pc] gives
+    // the frame size for the call-entry label starting at pc.
+    let n_ins = p.ins.len();
+    o.push_str(&format!("static long uf_lc_v[{}];\n", n_ins + 1));
+    if !p.local_counts.is_empty() {
+        o.push_str("static void uf_init_locals(void){");
+        for (&pc, &count) in &p.local_counts {
+            o.push_str(&format!("uf_lc_v[{}]={};", pc, count));
+        }
+        o.push_str("}\n");
+    } else {
+        o.push_str("static void uf_init_locals(void){}\n");
+    }
+    o.push_str("static long uf_lc(long pc){ return (pc>=0&&(unsigned long)pc<(unsigned long)(sizeof(uf_lc_v)/sizeof(uf_lc_v[0])))?uf_lc_v[pc]:0; }\n");
     // label -> instruction index
     let resolve = |name: &str| -> usize {
         *p.labels.get(name).unwrap_or_else(|| panic!("undefined label {}", name))
     };
-    o.push_str("\nstatic void uflux_run(Ctx*cx, long pc){\n  if(pc<0){ goto *(void*)uf_entry_addr; }\n");
+    o.push_str("\nstatic void uflux_run(Ctx*cx, long pc){\n  if(pc<0){ goto *(void*)uf_entry_addr; }\n  /* v11: set up the entry label's local frame */\n  cx->local_frames[cx->local_fsp++]=cx->local_base; cx->local_base+=uf_lc(pc);\n");
     let n = p.ins.len();
     // Only labels that can be entered dynamically (initial pc, FOR bodies via
     // PushAddr, weave task entries, SEND methods, exports) go into labtab.
@@ -687,13 +723,19 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
                 }
             }
         }
-        // CALL inlining: detect Ins::Call(label) where body is inlinable
+        // CALL inlining: detect Ins::Call(label) where body is inlinable.
+        // v11: skip inlining if the target body (or any PushAddr continuation
+        // within it) uses local variables — the inlined copy's local_base
+        // offset would mismatch the original's PushAddr continuation labels.
         if let Ins::Call(l) = &p.ins[j] {
             if !targets.contains(&j) {
                 let bs = resolve(l);
                 if let Some(be) = for_body_range(&p.ins, bs) {
                     if inlinable_for(p, bs, be) {
-                        inline_calls.insert(j, (bs, be));
+                        let has_locals = (bs..be).any(|k| matches!(p.ins[k], Ins::LocalSet(_) | Ins::LocalGet(_) | Ins::LocalSetI(_) | Ins::LocalGetI(_)));
+                        if !has_locals {
+                            inline_calls.insert(j, (bs, be));
+                        }
                     }
                 }
             }
@@ -722,13 +764,13 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
     for (cname, label) in &p.exports {
         let lidx = resolve(label);
         o.push_str(&format!(
-            "uint64_t {}(uint64_t a0,uint64_t a1,uint64_t a2,uint64_t a3){{Ctx*cx=main_cx;long base=cx->sp;pushp(cx,(void*)a0);pushp(cx,(void*)a1);pushp(cx,(void*)a2);pushp(cx,(void*)a3);cx->cs[cx->csp++]=0;uflux_run(cx,{});uint64_t r=(cx->sp>base)?(uint64_t)pop(cx).i:0;cx->sp=base;return r;}}\n",
+            "uint64_t {}(uint64_t a0,uint64_t a1,uint64_t a2,uint64_t a3){{Ctx*cx=main_cx;long base=cx->sp;long _lb=cx->local_base;pushp(cx,(void*)a0);pushp(cx,(void*)a1);pushp(cx,(void*)a2);pushp(cx,(void*)a3);uflux_run(cx,{});uint64_t r=(cx->sp>base)?(uint64_t)pop(cx).i:0;cx->sp=base;cx->local_base=_lb;return r;}}\n",
             cname, lidx
         ));
     }
     let lits_arg = if p.strings.is_empty() { "0,0".to_string() } else { format!("uf_lits,{}", p.strings.len()) };
     let roots_arg = if p.vars.is_empty() { "0,0".to_string() } else { format!("uf_vroots,{}", p.vars.len()) };
-    o.push_str(&format!("int main(int argc,char**argv){{uf_argc=argc;uf_argv=(void*)argv;uf_init_reflection();uf_init_lits({});uf_gc_setroots({});uf_gc_init();uflux_run(main_cx,0);return 0;}}\n", lits_arg, roots_arg));
+    o.push_str(&format!("int main(int argc,char**argv){{uf_argc=argc;uf_argv=(void*)argv;uf_init_reflection();uf_init_locals();uf_init_lits({});uf_gc_setroots({});uf_gc_init();uflux_run(main_cx,0);return 0;}}\n", lits_arg, roots_arg));
     o
 }
 

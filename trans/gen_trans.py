@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 # Generates trans/trans.uf (µFlux hieroglyph source). Convenience only —
 # the artifact is hand-authored µFlux; this just avoids glyph-counting typos.
+#
+# NOTE: This generator is outdated. It targets v9 dense encoding with removed
+# opcodes (JMP/JZ/JE/IDX/SETI). The hand-written trans/trans.uf is the
+# authoritative source (v11 text encoding). Do not regenerate without first
+# updating this script to the v11 opcode set and ^-prefixed variable syntax.
 import sys
 
 def O(i): return chr(0x13000 + i)   # opcode glyph by index

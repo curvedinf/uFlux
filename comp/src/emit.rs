@@ -36,8 +36,10 @@ pub fn emit_text(toks: &[Tok]) -> String {
             Tok::PushF(v) => o.push_str(&format!("{:?} ", v)),
             Tok::PushS(s) => o.push_str(&format!("\"{}\" ", escape_str(s))),
             Tok::Jump(op, l) => o.push_str(&format!("{} {} ", text_mnemonic(op_index(op).expect("jump")), l)),
-            Tok::SetV(n) => o.push_str(&format!("{}! ", n)),
-            Tok::GetV(n) => o.push_str(&format!("{}@ ", n)),
+            Tok::SetV(n) => o.push_str(&format!("^{}! ", n)),
+            Tok::GetV(n) => o.push_str(&format!("^{}@ ", n)),
+            Tok::LocalSet(n) => o.push_str(&format!("{}! ", n)),
+            Tok::LocalGet(n) => o.push_str(&format!("{}@ ", n)),
             Tok::Import(im) => o.push_str(&format!("import c\"{}\"({})->{} ", im.name, im.params.join(","), im.ret)),
             Tok::Export(n) => o.push_str(&format!("export \"{}\" ", escape_str(n))),
             Tok::Extern(n) => o.push_str(&format!("extern \"{}\" ", escape_str(n))),
@@ -150,8 +152,10 @@ pub fn emit_dense(toks: &[Tok]) -> String {
                         o.push(' ');
                     }
                 }
-                Tok::SetV(n) => o.push_str(&format!("{}! ", nm(n, names, next))),
-                Tok::GetV(n) => o.push_str(&format!("{}@ ", nm(n, names, next))),
+                Tok::SetV(n) => o.push_str(&format!("^{}! ", nm(n, names, next))),
+                Tok::GetV(n) => o.push_str(&format!("^{}@ ", nm(n, names, next))),
+                Tok::LocalSet(n) => o.push_str(&format!("{}! ", nm(n, names, next))),
+                Tok::LocalGet(n) => o.push_str(&format!("{}@ ", nm(n, names, next))),
                 Tok::Import(im) => o.push_str(&format!("{}c\"{}\"({})->{} ", glyph_of(51), im.name, im.params.join(","), im.ret)),
                 Tok::Export(n) => o.push_str(&format!("{}\"{}\" ", glyph_of(52), escape_str(n))),
                 Tok::Extern(n) => o.push_str(&format!("{}\"{}\" ", glyph_of(53), escape_str(n))),

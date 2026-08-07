@@ -2,10 +2,6 @@
 0 5 range iter 'dbl imap collect len "%d\n" print drop
 0 5 range iter 'dbl imap collect 3 get "%d\n" print drop
 0 10 range iter 'ev ifilter collect len "%d\n" print drop
-jmp over
-dbl: 2 mul ret
-ev: 2 rem 0 eq ret
-over:
 ; next
 0 3 range iter it!
 it@ next "%d %d\n" print drop
@@ -30,15 +26,16 @@ j@ unjson "%s\n" print drop
 0 cnt!
 2 'flaky retry "%d %d\n" print drop
 cnt@ "%d\n" print drop
-jmp over2
-good: 42 ret
-bad: 1 0 div ret
-flaky: cnt@ inc cnt! cnt@ 2 lt jz ok2 1 0 div ret ok2: 99 ret
-over2:
 ; spawn
 'work spawn c!
 c@ deq "%d\n" print drop
-jmp over3
-work: 7 7 mul ret
-over3:
 "done\n" print drop
+ret
+; --- quotation bodies ---
+dbl: 2 mul ret
+ev: 2 rem 0 eq ret
+good: 42 ret
+bad: 1 0 div ret
+flaky: cnt@ inc cnt! cnt@ 2 lt 'do_err if 99 ret
+do_err: 1 0 div ret
+work: 7 7 mul ret

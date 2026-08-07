@@ -1,4 +1,4 @@
-# µFlux Specification v10 (this repo)
+# µFlux Specification v11 (this repo)
 
 Based on the µFlux Whitepaper v7.0 (`µFlux_Whitepaper_v7.0.pdf`), with the v8
 encoding rework, the v9 feature set (library modules, op-native
@@ -9,9 +9,10 @@ weave fanout, iterators, JSON, large-data and data-analytics opcodes) merged
 into one document. This document is normative for `comp/` (the `uf` compiler).
 The `trans/` transpiler targets the **text encoding** (see the final section).
 
-**v10 is intentionally not backward compatible with v9** — the project is
-undeployed and developmental, so this revision optimizes the language itself
-rather than the migration path.
+**v11 is intentionally not backward compatible with v10** — `x!`/`x@` change
+from global static variables to call-local variables. Globals must be written
+with the `^` prefix (`^x!`/`^x@`). The project is undeployed and developmental,
+so this breaking change optimizes the language for LLM authoring.
 
 ## Purpose
 
@@ -133,13 +134,20 @@ from `𓍢`). Whitespace must separate two adjacent v-runs that are meant to be
 distinct names — including a label definition followed by a variable
 reference.
 
-- `<v-run>!` or `<v-run><SETV glyph>`: pop into variable.
-- `<v-run>@` or `<v-run><GETV glyph>`: push variable.
+v11 implicit local variables:
+- `<v-run>!` or `<v-run><SETV glyph>`: pop into **local** variable (call-scoped).
+- `<v-run>@` or `<v-run><GETV glyph>`: push **local** variable.
+- `^<v-run>!` / `^<v-run>@`: pop/push **global** variable (static, v10 semantics).
 - A v-run immediately after CALL/ADDR/`'` is a label
   **reference**.
 - Any other bare v-run is a label **definition** (no colon needed).
 - ASCII `name:` still defines a label; ASCII names still work as jump targets.
 - IMPORT/EXPORT/EXTERN/MACRO/STRUCT names remain ASCII.
+
+Local variables exist from first assignment until the nearest enclosing RET.
+Every CALL creates a fresh local-variable frame; if/while/for body labels are
+continuations that share the caller's frame. Globals (prefixed with `^`) keep
+the v10 static-variable behavior and persist across calls.
 
 ## Type glyphs and immediates
 
@@ -225,8 +233,8 @@ and final for tooling).
 | 27 | 𓄪 | U+1312A | `cast` | h type → h (checked) |
 | 28 | 𓄳 | U+13133 | `macro` | (directive) |
 | 29 | 𓉓 | U+13253 | `tensor` | len → h (type immediate) |
-| 33 | 𓂤 | U+130A4 | `setv` (`<v>!`) | value → |
-| 34 | 𓁻 | U+1307B | `getv` (`<v>@`) | → value |
+| 33 | 𓂤 | U+130A4 | `setv` (`<v>!` / `^<v>!`) | value → (v11: local store; `^` for global) |
+| 34 | 𓁻 | U+1307B | `getv` (`<v>@` / `^<v>@`) | → value (v11: local fetch; `^` for global) |
 | 35 | 𓂋 | U+1308B | `str` | → h (bare `"…"` preferred) |
 | 36 | 𓂌 | U+1308C | `cat` | a b → h |
 | 37 | 𓂍 | U+1308D | `fmt` | args… fmt → h |
@@ -565,8 +573,10 @@ them. (Historical note: these tokens were introduced in v8 and are unchanged.)
 | `-` | SUB or number sign, by the lookback rule (above) |
 | `*` | MUL |
 | `&` | AND |
-| `<v-run>@` | GETV (push variable) |
-| `<v-run>!` | SETV (pop into variable) |
+| `<v-run>@` | GETV — push local variable (v11: call-scoped) |
+| `<v-run>!` | SETV — pop into local variable (v11: call-scoped) |
+| `^<name>@` | push global variable (v11) |
+| `^<name>!` | pop into global variable (v11) |
 | `'<label>` | ADDR (push code address of label) |
 
 A bare `"..."` string self-evaluates (equivalent to `STR "..."`). A bare `@`
@@ -616,8 +626,9 @@ refinement; the compiler always emits `-l<name>`.
 a TU's top-level flow never falls into the next TU). Per-TU:
 
 - Optional `MOD"name"` header; default is the filename stem (`main` for
-  inline/stdin). Glyph v-names and ASCII labels are file-local, variables are
-  always file-local, macros are file-local.
+  inline/stdin). Glyph v-names and ASCII labels are file-local, global
+  variables (`^name`) are file-local, macros are file-local. Local variables
+  (`name`) are call-scoped (v11).
 - `PUB` before a label def (glyph or ASCII) exports the label to the global
   namespace; CALL/`'` resolve PUB names across TUs. Duplicate PUB = compile
   error. STRUCTs and IMPORT/EXTERN/USE are global (deduped).
@@ -640,8 +651,9 @@ Bare `uf` (or `uf somedir/`) discovers source files automatically:
 
 Init threads are detached pthreads — fire-and-forget services that start
 before `main` and are killed when the process exits. Each gets its own `Ctx`
-(data stack, call stack); variables are shared (global statics), as with all
-TUs. Coordination between init threads and `main` uses the existing channel
+(data stack, call stack); global variables (`^name`) are shared across all
+threads and TUs (v11). Coordination between init threads and `main` uses the
+existing channel
 (`chan`/`enq`/`deq`) and PUB/CALL mechanisms — an init thread creates a channel
 at startup and publishes its handle via a PUB function that `main` calls to
 get the channel. Because init threads start concurrently with `main`, a
@@ -680,9 +692,10 @@ FFI, chan buffers, and weave task results trivially safe).
   children during marking; str/bitmap/bloom bodies are leaf bytes and are
   skipped.
 - **Roots** (all precise — cells are tagged, so no conservative scanning):
-  each `Ctx`'s data and call stacks (cells with heap tags), all variables,
-  weave task results, and chan queue contents. Registers/C-stack values are
-  never roots: the interpreter only holds handles inside cells, which is
+  each `Ctx`'s data and call stacks (cells with heap tags), all global
+  variables (`^name`), active local-variable frames (`locals[0..local_base]`,
+  v11), weave task results, and chan queue contents. Registers/C-stack values
+  are never roots: the interpreter only holds handles inside cells, which is
   already the invariant the v9 `Ctx` refactor established.
 - **Untagged pointers** (`malloc`, `buf`) are never traced and never freed
   by the collector — they remain manual (`free`) or process-lifetime. This
@@ -715,7 +728,8 @@ wrun                       ; 𓐐 schedule the DAG, wait, publish results
   restriction and the old max-8-inputs cap are gone). Unknown input or
   cycle = compile error. Task bodies are
   self-contained: their labels are task-local (two tasks may reuse v-names);
-  variables are shared.
+  variables are shared (v11: global variables `^name` cross task boundaries;
+  local variables are per-task).
 - Runtime: worker pool of `min(total declared workers, ncpu)` pthreads plus
   the calling thread. Each task runs with its own fresh data + call stacks;
   inputs are copied in as the task's initial stack in declared order;

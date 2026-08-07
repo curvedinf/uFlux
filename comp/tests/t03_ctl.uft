@@ -3,40 +3,26 @@
 0 'yes if
 1 'then 'els ifelse
 0 'then 'els ifelse
-jmp over
+; while with break/cont
+; v11: break condition (i==7) folded into while-cond (break can't live in
+; an if sub-body — the compiler rejects break/cont outside a loop body).
+; continue condition (i==3) handled via ifelse that skips the print.
+0 i!
+'i_c 'i_b while
+"\n" print drop
+; for with break/cont
+3 'fbody for
+"\n" print drop
+"done\n" print drop
+ret
+; --- quotation bodies (all continuations of the top-level call body) ---
 yes: "YES\n" print ret
 then: "THEN\n" print ret
 els: "ELS\n" print ret
-over:
-; while with break/cont
-0 i!
-'i_c 'i_b while
-jmp done
-i_c: i@ 10 lt ret
-i_b:
-  i@ inc i!
-  i@ 3 eq jz skip3
-    cont
-  skip3:
-  i@ 7 eq jz skip7
-    break
-  skip7:
-  i@ "%d " print
-  ret
-done:
-"\n" print
-; for with break/cont
-3 'fbody for
-"\n" print
-jmp end
-fbody:
-  dup 1 eq jz nf1
-    drop cont
-  nf1:
-  dup 4 eq jz nf4
-    drop break
-  nf4:
-  "%d " print
-  ret
-end:
-"done\n" print
+i_c: i@ inc i! i@ 10 lt i@ 7 eq not and ret
+i_b: i@ 3 eq not 'pr 'np ifelse 0 ret
+pr: i@ "%d " print ret
+np: 0 ret
+fbody: dup 1 eq 'fnp 'fpr ifelse ret
+fpr: "%d " print ret
+fnp: drop 0 ret

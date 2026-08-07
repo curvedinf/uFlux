@@ -15,8 +15,10 @@ pub enum Tok {
     PushF(f64),
     PushS(String),             // STR literal
     Jump(&'static str, String), // CALL/ADDR + label (JMP/JZ/JE removed in v10.1)
-    SetV(String),
-    GetV(String),
+    SetV(String),                 // ^x! — global store (v11)
+    GetV(String),                 // ^x@ — global fetch (v11)
+    LocalSet(String),             // x!  — local store (v11)
+    LocalGet(String),             // x@  — local fetch (v11)
     Import(Import),
     Export(String),
     Extern(String),
@@ -49,6 +51,10 @@ pub enum Ins {
     Ret,
     SetV(String),
     GetV(String),
+    LocalSet(String),             // v11: unresolved local store (name)
+    LocalGet(String),             // v11: unresolved local fetch (name)
+    LocalSetI(usize),             // v11: resolved local store (slot)
+    LocalGetI(usize),             // v11: resolved local fetch (slot)
     Extern(String),
     Send,                        // runtime dispatch through the method table
     Weave(Vec<WeaveMeta>),       // schedule a static task DAG, publish results
@@ -84,6 +90,7 @@ pub struct Parsed {
     pub methods: Vec<(i64, i64, String)>, // (type key, method name hash, label)
     pub init_pcs: Vec<usize>, // instruction offsets of init-TU entry points (auto-thread)
     pub entry_label: Option<String>, // label name of the ENTRY marker (jmp-from-pc0 target)
+    pub local_counts: HashMap<usize, usize>, // v11: label pc -> frame size (local variable count)
 }
 
 // struct layouts: field name -> offset, total size, struct id. Shared across

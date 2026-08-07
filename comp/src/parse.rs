@@ -52,6 +52,7 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
         methods: Vec::new(),
         init_pcs: Vec::new(),
         entry_label: None,
+        local_counts: HashMap::new(),
     };
     let mut q: VecDeque<Tok> = toks.into();
     let mut pending_export: Option<String> = None;
@@ -105,6 +106,12 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
                     p.vars.push(n.clone());
                 }
                 p.ins.push(Ins::GetV(n));
+            }
+            Tok::LocalSet(n) => {
+                p.ins.push(Ins::LocalSet(n));
+            }
+            Tok::LocalGet(n) => {
+                p.ins.push(Ins::LocalGet(n));
             }
             Tok::Import(im) => {
                 if !p.imports.iter().any(|x| x.name == im.name) {
@@ -357,10 +364,165 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
             }
         }
     }
+    // Note: resolve_locals is deferred to merge_tus, where all TU offsets
+    // are finalized. Calling it here would produce per-TU slot IDs and frame
+    // sizes that are invalidated when instructions are offset during merge.
     p
 }
 
-// rewrite label definitions and references inside a task body to be task-local
+// v11: resolve implicit local variables into per-call-body slot IDs.
+//
+// A "call body" is a group of labels that share a single local-variable frame.
+// Each CALL target (or the entry label / pc 0) starts a new call body. Labels
+// reached via PushAddr (if/while/for bodies) are continuations that share the
+// frame of the call body that references them.
+//
+// To determine ownership, we use a worklist algorithm: starting from each
+// call-entry label, we propagate the body ID to all PushAddr targets within
+// the same body's instruction range. This correctly handles continuation
+// labels that appear after other call entries in the instruction stream.
+pub fn resolve_locals(p: &mut Parsed) {
+    if p.ins.is_empty() {
+        return;
+    }
+    // Determine which labels are "call entries" (get their own frame).
+    let mut call_entries: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    call_entries.insert(0);
+    if let Some(el) = &p.entry_label {
+        if let Some(&pc) = p.labels.get(el) {
+            call_entries.insert(pc);
+        }
+    }
+    for ins in &p.ins {
+        if let Ins::Call(l) = ins {
+            if let Some(&pc) = p.labels.get(l) {
+                call_entries.insert(pc);
+            }
+        }
+    }
+    for ins in &p.ins {
+        if let Ins::Weave(tasks) = ins {
+            for t in tasks {
+                if let Some(&pc) = p.labels.get(&t.pc) {
+                    call_entries.insert(pc);
+                }
+            }
+        }
+    }
+    for (_, l) in &p.exports {
+        if let Some(&pc) = p.labels.get(l) {
+            call_entries.insert(pc);
+        }
+    }
+
+    // Build a sorted list of label PCs to delimit label regions.
+    // Always include pc 0 (the implicit entry point) even if there's no label.
+    let mut all_label_pcs: Vec<usize> = p.labels.values().copied().collect();
+    all_label_pcs.push(0);
+    all_label_pcs.sort();
+    all_label_pcs.dedup();
+
+    // For each label PC, find the nearest preceding call-entry PC.
+    // That call-entry is the "body owner" for that label's region.
+    // But continuation labels (PushAddr targets) may belong to a body whose
+    // entry is further back, past other call entries. We fix this with a
+    // propagation pass: each PushAddr instruction inside body X that references
+    // label L means L belongs to body X (regardless of position).
+    //
+    // Step 1: Initial assignment by position (nearest preceding call entry).
+    let mut label_body: HashMap<usize, usize> = HashMap::new(); // label_pc -> body_entry_pc
+    {
+        let mut cur_body = 0usize; // pc 0 is always a call entry
+        for &pc in &all_label_pcs {
+            if call_entries.contains(&pc) {
+                cur_body = pc;
+            }
+            label_body.insert(pc, cur_body);
+        }
+    }
+
+    // Step 2: Propagate body ownership through PushAddr references.
+    // For each label's instruction range, find PushAddr instructions and
+    // reassign their target labels to the same body.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        // Build (label_pc, next_label_pc) ranges
+        let mut ranges: Vec<(usize, usize)> = all_label_pcs.iter().copied().zip({
+            let mut nexts = all_label_pcs.iter().copied().skip(1).collect::<Vec<_>>();
+            nexts.push(p.ins.len());
+            nexts.into_iter()
+        }).collect();
+        ranges.sort();
+        for &(lpc, end) in &ranges {
+            let body = *label_body.get(&lpc).unwrap_or(&0);
+            for i in lpc..end {
+                if i >= p.ins.len() { break; }
+                if let Ins::PushAddr(target) = &p.ins[i] {
+                    if let Some(&target_pc) = p.labels.get(target) {
+                        let target_body = *label_body.get(&target_pc).unwrap_or(&0);
+                        if target_body != body {
+                            label_body.insert(target_pc, body);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 3: For each instruction, determine its body by finding the nearest
+    // preceding label and looking up that label's body.
+    let mut ins_body: Vec<usize> = vec![0usize; p.ins.len()];
+    {
+        let mut cur_body = 0usize;
+        for i in 0..p.ins.len() {
+            if all_label_pcs.contains(&i) {
+                if let Some(&b) = label_body.get(&i) {
+                    cur_body = b;
+                }
+            }
+            ins_body[i] = cur_body;
+        }
+    }
+
+    // Step 4: Collect local names per body, assigning slot IDs.
+    let mut body_slots: HashMap<usize, HashMap<String, usize>> = HashMap::new();
+    for (i, ins) in p.ins.iter().enumerate() {
+        let body = ins_body[i];
+        let slots = body_slots.entry(body).or_default();
+        match ins {
+            Ins::LocalSet(n) | Ins::LocalGet(n) => {
+                if !slots.contains_key(n) {
+                    let id = slots.len();
+                    slots.insert(n.clone(), id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Step 5: Record frame sizes and resolve instructions.
+    for (&body, slots) in &body_slots {
+        p.local_counts.insert(body, slots.len());
+    }
+    for (i, ins) in p.ins.iter_mut().enumerate() {
+        let body = ins_body[i];
+        match ins {
+            Ins::LocalSet(n) => {
+                if let Some(&id) = body_slots.get(&body).and_then(|s| s.get(n)) {
+                    *ins = Ins::LocalSetI(id);
+                }
+            }
+            Ins::LocalGet(n) => {
+                if let Some(&id) = body_slots.get(&body).and_then(|s| s.get(n)) {
+                    *ins = Ins::LocalGetI(id);
+                }
+            }
+            _ => {}
+        }
+    }
+}
 pub fn prefix_task_labels(body: Vec<Tok>, prefix: &str) -> Vec<Tok> {
     body.into_iter()
         .map(|t| match t {
@@ -391,6 +553,7 @@ pub fn merge_tus(tus: Vec<Parsed>, mods: Vec<String>, init_flags: &[bool]) -> Pa
         methods: Vec::new(),
         init_pcs: Vec::new(),
         entry_label: None,
+        local_counts: HashMap::new(),
     };
     for (tu_idx, (tu, defmod)) in tus.into_iter().zip(mods).enumerate() {
         let modname = tu.modname.clone().unwrap_or(defmod);
@@ -431,6 +594,10 @@ pub fn merge_tus(tus: Vec<Parsed>, mods: Vec<String>, init_flags: &[bool]) -> Pa
                 Ins::Ret => Ins::Ret,
                 Ins::SetV(v) => Ins::SetV(format!("{}__{}", modname, v)),
                 Ins::GetV(v) => Ins::GetV(format!("{}__{}", modname, v)),
+                Ins::LocalSet(n) => Ins::LocalSet(n.clone()),
+                Ins::LocalGet(n) => Ins::LocalGet(n.clone()),
+                Ins::LocalSetI(id) => Ins::LocalSetI(*id),
+                Ins::LocalGetI(id) => Ins::LocalGetI(*id),
                 Ins::Extern(n) => Ins::Extern(n.clone()),
                 Ins::Send => Ins::Send,
                 Ins::Weave(metas) => Ins::Weave(
@@ -489,6 +656,7 @@ pub fn merge_tus(tus: Vec<Parsed>, mods: Vec<String>, init_flags: &[bool]) -> Pa
             }
         }
     }
+    resolve_locals(&mut m);
     m
 }
 

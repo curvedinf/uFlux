@@ -23,4 +23,4 @@ weave
   endt
   a b task c + endt
 wrun
-c@ "result=%d\n" print drop "42 expected\n" print drop
+^c@ "result=%d\n" print drop "42 expected\n" print drop

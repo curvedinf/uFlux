@@ -51,18 +51,32 @@ enum { IT_LIST=0, IT_ARR, IT_DICT, IT_STR, IT_CHAN, IT_BITMAP, IT_MAP, IT_FILTER
 typedef struct { UFHDR; Cell src; int kind; int64_t idx; Cell f; Cell g; } Iter;
 static char* uf_data(Hdr*a){ return a->tag==HT_DYN ? (char*)((Dyn*)a)->data : (char*)a->data; }
 
+/* v11: per-label local frame sizes. Indexed by instruction PC; zero means
+   the label has no locals. Populated by the generated code's uf_init_locals(). */
+static long* uf_local_counts; /* [pc] = frame size */
+
 /* per-task execution context: each weave task / spawn runs with its own stacks.
-   loops: dynamic loop-frame stack for BREAK/CONT unwinding. */
+   loops: dynamic loop-frame stack for BREAK/CONT unwinding.
+   locals: v11 flat array of local-variable cells; local_base is the start of
+   the current call's frame. local_frames/local_fsp save/restore local_base
+   across CALL/RET boundaries. */
 typedef struct { const void* end; const void* cont; long cspl; } UfLoop;
-typedef struct CtxS { Cell* ds; long sp; long dcap; const void** cs; long csp; long ccap; UfLoop loops[64]; long lsp; struct CtxS* gc_prev; } Ctx;
+typedef struct CtxS {
+  Cell* ds; long sp; long dcap;
+  const void** cs; long csp; long ccap;
+  UfLoop loops[64]; long lsp;
+  Cell* locals; long local_base; long local_cap;
+  long* local_frames; long local_fsp; long local_fcap;
+  struct CtxS* gc_prev;
+} Ctx;
 
 static void uflux_run(Ctx*cx, long pc);
 static _Thread_local const void* uf_entry_addr;
-static void uf_call_addr(Ctx*cx, const void* a){ cx->cs[cx->csp++]=0; uf_entry_addr=a; uflux_run(cx,-1); }
+static void uf_call_addr(Ctx*cx, const void* a, long frame){ cx->cs[cx->csp++]=(const void*)0; cx->local_frames[cx->local_fsp++]=cx->local_base; cx->local_base+=frame; uf_entry_addr=a; uflux_run(cx,-1); cx->local_base=cx->local_frames[--cx->local_fsp]; }
 
 /* ---- error containment (try/retry): die unwinds to the nearest setjmp
    checkpoint; with no checkpoint die is fatal, as before ---- */
-typedef struct UfTry { jmp_buf jb; struct UfTry* prev; long sp; long csp; } UfTry;
+typedef struct UfTry { jmp_buf jb; struct UfTry* prev; long sp; long csp; long local_base; long local_fsp; } UfTry;
 static _Thread_local UfTry* uf_try_top = 0;
 static _Thread_local void* uf_cur_task; /* WeaveTask* for debug counters */
 static void die(const char*m){
@@ -179,7 +193,10 @@ static void uf_gc_collect(void){
   /* mark all roots */
   for(long i=0;i<uf_nvar_roots;i++) uf_mark_cell(*uf_var_roots[i]);
   int nc = uf_nctxs;
-  for(int i=0;i<nc;i++){ Ctx* c=uf_ctxs[i]; for(long s=0;s<c->sp;s++) uf_mark_cell(c->ds[s]); }
+  for(int i=0;i<nc;i++){ Ctx* c=uf_ctxs[i]; for(long s=0;s<c->sp;s++) uf_mark_cell(c->ds[s]);
+    /* v11: mark active local-variable frame */
+    for(long s=0;s<c->local_base;s++) uf_mark_cell(c->locals[s]);
+  }
   int nt = uf_ntmp; if(nt>UF_MAXTMP)nt=UF_MAXTMP;
   for(int i=0;i<nt;i++){ void** pp=uf_tmp_roots[i]; if(pp&&*pp) uf_mark_ptr(*pp); }
   if(uf_active_job) uf_weave_mark(uf_active_job);
@@ -236,10 +253,11 @@ static void uf_gc_init(void){
 }
 static void op_gc(Ctx*cx){ (void)cx; uf_gc_collect(); }
 
-static Ctx* ctx_new(long dcap,long ccap){ Ctx*c=(Ctx*)calloc(1,sizeof(Ctx)); if(!c)die("out of memory"); c->ds=(Cell*)malloc(dcap*sizeof(Cell)); c->cs=(const void**)malloc(ccap*sizeof(void*)); if(!c->ds||!c->cs)die("out of memory"); c->dcap=dcap; c->ccap=ccap; atomic_store(&uf_gc_mt,1); ctx_register(c); return c; }
-static void ctx_free(Ctx*c){ ctx_unregister(c); free(c->ds); free((void*)c->cs); free(c); }
+static Ctx* ctx_new(long dcap,long ccap){ Ctx*c=(Ctx*)calloc(1,sizeof(Ctx)); if(!c)die("out of memory"); c->ds=(Cell*)malloc(dcap*sizeof(Cell)); c->cs=(const void**)malloc(ccap*sizeof(void*)); c->locals=(Cell*)calloc(65536,sizeof(Cell)); c->local_frames=(long*)malloc(65536*sizeof(long)); if(!c->ds||!c->cs||!c->locals||!c->local_frames)die("out of memory"); c->dcap=dcap; c->ccap=ccap; c->local_cap=65536; c->local_fcap=65536; atomic_store(&uf_gc_mt,1); ctx_register(c); return c; }
+static void ctx_free(Ctx*c){ ctx_unregister(c); free(c->ds); free((void*)c->cs); free(c->locals); free(c->local_frames); free(c); }
 static Cell main_ds[1<<20]; static const void* main_cs[1<<16];
-static Ctx main_cx_store = { main_ds, 0, 1<<20, main_cs, 0, 1<<16, {{0,0,0}}, 0, 0 };
+static Cell main_locals[65536]; static long main_local_frames[65536];
+static Ctx main_cx_store = { main_ds, 0, 1<<20, main_cs, 0, 1<<16, {{0,0,0}}, 0, main_locals, 0, 65536, main_local_frames, 0, 65536, 0 };
 static Ctx* main_cx = &main_cx_store;
 int64_t uf_argc=0; void* uf_argv=0; /* program args, reachable via EXTERN "uf_argc"/"uf_argv" + LOADX, or ARGV */
 
@@ -703,8 +721,8 @@ static int uf_iter_next(Ctx*cx, Iter* it, Cell* out){
     case IT_STR: { Str*s=(Str*)uf_gc_find((void*)it->src.i); if(!s)return 0; if((uint64_t)it->idx>=s->len)return 0; *out=uf_mki((uint8_t)uf_sbytes(s)[it->idx++]); return 1; }
     case IT_CHAN: { Ring*r=(Ring*)uf_gc_find((void*)it->src.i); if(!r)return 0; return ring_deq1(r,out)?0:1; }
     case IT_BITMAP: { Bitmap*b=(Bitmap*)uf_gc_find((void*)it->src.i); if(!b)return 0; uint64_t n=b->len; while((uint64_t)it->idx<n){ uint64_t w=(uint64_t)it->idx>>6, o=(uint64_t)it->idx&63; if((w<(n+63)/64)&&((b->words[w]>>o)&1)){ *out=uf_mki(it->idx++); return 1; } it->idx++; } return 0; }
-    case IT_MAP: { Iter* in=(Iter*)uf_gc_find((void*)it->g.i); if(!in)return 0; Cell v; if(!uf_iter_next(cx,in,&v))return 0; pushc(cx,v); uf_call_addr(cx,(const void*)it->f.i); *out=pop(cx); return 1; }
-    case IT_FILTER: { Iter* in=(Iter*)uf_gc_find((void*)it->g.i); if(!in)return 0; Cell v; while(uf_iter_next(cx,in,&v)){ pushc(cx,v); uf_call_addr(cx,(const void*)it->f.i); Cell r=pop(cx); if(!uf_zero(r)){ *out=v; return 1; } } return 0; }
+    case IT_MAP: { Iter* in=(Iter*)uf_gc_find((void*)it->g.i); if(!in)return 0; Cell v; if(!uf_iter_next(cx,in,&v))return 0; pushc(cx,v); uf_call_addr(cx,(const void*)it->f.i,0); *out=pop(cx); return 1; }
+    case IT_FILTER: { Iter* in=(Iter*)uf_gc_find((void*)it->g.i); if(!in)return 0; Cell v; while(uf_iter_next(cx,in,&v)){ pushc(cx,v); uf_call_addr(cx,(const void*)it->f.i,0); Cell r=pop(cx); if(!uf_zero(r)){ *out=v; return 1; } } return 0; }
   }
   return 0;
 }
@@ -800,7 +818,7 @@ static void* uf_fan_worker(void* arg){
     pushc(c,item);
     j->run(c,t->pc);
     Cell r = c->sp>0 ? c->ds[c->sp-1] : uf_mki(0);
-    c->sp=0; c->csp=0; c->lsp=0;
+    c->sp=0; c->csp=0; c->lsp=0; c->local_base=0; c->local_fsp=0;
     pthread_mutex_lock(f->rmu);
     f->results=uf_dyn_push2(f->results,r);
     t->items++;
@@ -1388,7 +1406,7 @@ static void op_filter(Ctx*cx){
   Dyn* s=uf_materialize(cx,h); UF_PROTECT(&s);
   Dyn* r=uf_dyn_new(8); UF_PROTECT(&r);
   for(uint64_t i=0;i<s->len;i++){
-    pushc(cx,s->data[i]); uf_call_addr(cx,(const void*)f.i); Cell k=pop(cx);
+    pushc(cx,s->data[i]); uf_call_addr(cx,(const void*)f.i,0); Cell k=pop(cx);
     if(!uf_zero(k)) uf_dyn_push(&r,s->data[i]);
   }
   UF_UNPROTECT(); UF_UNPROTECT();
@@ -1398,13 +1416,13 @@ static void op_filter(Ctx*cx){
 static void op_some(Ctx*cx){
   Cell f=pop(cx),h=pop(cx); Dyn* s=uf_materialize(cx,h); UF_PROTECT(&s);
   int r=0;
-  for(uint64_t i=0;i<s->len;i++){ pushc(cx,s->data[i]); uf_call_addr(cx,(const void*)f.i); if(!uf_zero(pop(cx))){r=1;break;} }
+  for(uint64_t i=0;i<s->len;i++){ pushc(cx,s->data[i]); uf_call_addr(cx,(const void*)f.i,0); if(!uf_zero(pop(cx))){r=1;break;} }
   UF_UNPROTECT(); pushi(cx,r);
 }
 static void op_every(Ctx*cx){
   Cell f=pop(cx),h=pop(cx); Dyn* s=uf_materialize(cx,h); UF_PROTECT(&s);
   int r=1;
-  for(uint64_t i=0;i<s->len;i++){ pushc(cx,s->data[i]); uf_call_addr(cx,(const void*)f.i); if(uf_zero(pop(cx))){r=0;break;} }
+  for(uint64_t i=0;i<s->len;i++){ pushc(cx,s->data[i]); uf_call_addr(cx,(const void*)f.i,0); if(uf_zero(pop(cx))){r=0;break;} }
   UF_UNPROTECT(); pushi(cx,r);
 }
 
@@ -1477,7 +1495,7 @@ static void op_vmap(Ctx*cx){
   Hdr*r=uf_arr_like(a,a->len); UF_PROTECT(&r);
   for(uint64_t i=0;i<a->len;i++){
     if(a->ety==1)pushf(cx,uf_el(a,i)); else pushi(cx,(int64_t)uf_el(a,i));
-    uf_call_addr(cx,(const void*)f.i);
+    uf_call_addr(cx,(const void*)f.i,0);
     uf_put_el(r,i,uf_f(pop(cx)));
   }
   UF_UNPROTECT(); pushp(cx,r);
@@ -1487,7 +1505,7 @@ static void op_vfold(Ctx*cx){
   for(uint64_t i=0;i<a->len;i++){
     pushc(cx,acc);
     if(a->ety==1)pushf(cx,uf_el(a,i)); else pushi(cx,(int64_t)uf_el(a,i));
-    uf_call_addr(cx,(const void*)f.i);
+    uf_call_addr(cx,(const void*)f.i,0);
     acc=pop(cx);
   }
   pushc(cx,acc);
@@ -1538,7 +1556,7 @@ static void op_group(Ctx*cx){
   Map* m=uf_map_new(); UF_PROTECT(&m);
   Dyn* order=uf_dyn_new(8); UF_PROTECT(&order);
   for(uint64_t i=0;i<s->len;i++){
-    pushc(cx,s->data[i]); uf_call_addr(cx,(const void*)f.i); Cell key=pop(cx);
+    pushc(cx,s->data[i]); uf_call_addr(cx,(const void*)f.i,0); Cell key=pop(cx);
     Cell lst;
     if(map_get(m,key,&lst)){ Dyn* nd=uf_dyn_push2((Dyn*)uf_gc_find((void*)lst.i),s->data[i]); if((void*)nd!=(void*)lst.i) map_put(m,key,uf_mkp(nd)); }
     else { Dyn* d=uf_dyn_new(4); d=uf_dyn_push2(d,s->data[i]); map_put(m,key,uf_mkp(d)); uf_dyn_push(&order,key); }
@@ -1552,7 +1570,7 @@ static void op_agg(Ctx*cx){
   Map* m=(Map*)a;
   Map* r=uf_map_new(); UF_PROTECT(&r);
   for(uint64_t i=0;i<m->cap;i++) if(m->st[i]==1){
-    pushc(cx,m->vals[i]); uf_call_addr(cx,(const void*)f.i); Cell v=pop(cx);
+    pushc(cx,m->vals[i]); uf_call_addr(cx,(const void*)f.i,0); Cell v=pop(cx);
     map_put(r,m->keys[i],v);
   }
   UF_UNPROTECT(); pushp(cx,r);
@@ -1724,7 +1742,7 @@ static void op_feach(Ctx*cx){
   while((m=getline(&line,&ncap,fp))>=0){
     while(m>0&&(line[m-1]=='\n'||line[m-1]=='\r'))line[--m]=0;
     Cell ls=uf_str_new(line,(size_t)m);
-    pushc(cx,ls); uf_call_addr(cx,(const void*)f.i); Cell k=pop(cx);
+    pushc(cx,ls); uf_call_addr(cx,(const void*)f.i,0); Cell k=pop(cx);
     if(uf_zero(k))break;
   }
   free(line); fclose(fp);
@@ -1737,7 +1755,7 @@ static void op_ffold(Ctx*cx){
   while((m=getline(&line,&ncap,fp))>=0){
     while(m>0&&(line[m-1]=='\n'||line[m-1]=='\r'))line[--m]=0;
     Cell ls=uf_str_new(line,(size_t)m);
-    pushc(cx,acc); pushc(cx,ls); uf_call_addr(cx,(const void*)f.i); acc=pop(cx);
+    pushc(cx,acc); pushc(cx,ls); uf_call_addr(cx,(const void*)f.i,0); acc=pop(cx);
   }
   free(line); fclose(fp);
   pushc(cx,acc);
@@ -1782,7 +1800,7 @@ static void op_fsplit(Ctx*cx){
       uf_fsplit_nfields++;
       cur=sp+el;
     }
-    pushc(cx,acc); pushi(cx,uf_fsplit_nfields); uf_call_addr(cx,(const void*)f.i); acc=pop(cx);
+    pushc(cx,acc); pushi(cx,uf_fsplit_nfields); uf_call_addr(cx,(const void*)f.i,0); acc=pop(cx);
   }
   free(line); fclose(fp);
   uf_fsplit_line=0; uf_fsplit_parent=0;
@@ -1939,7 +1957,7 @@ static void op_bfs(Ctx*cx){
   while(qi<queue->len){
     Cell node=queue->data[qi++];
     uf_dyn_push(&order,node);
-    pushc(cx,node); uf_call_addr(cx,(const void*)f.i); Cell nb=pop(cx);
+    pushc(cx,node); uf_call_addr(cx,(const void*)f.i,0); Cell nb=pop(cx);
     Dyn* nbs=uf_materialize(cx,nb); UF_PROTECT(&nbs);
     for(uint64_t i=0;i<nbs->len;i++){
       Cell v;
@@ -1963,7 +1981,7 @@ static void op_dfs(Ctx*cx){
     if(map_get(seen,node,&v))continue;
     map_put(seen,node,uf_mki(1));
     uf_dyn_push(&order,node);
-    pushc(cx,node); uf_call_addr(cx,(const void*)f.i); Cell nb=pop(cx);
+    pushc(cx,node); uf_call_addr(cx,(const void*)f.i,0); Cell nb=pop(cx);
     Dyn* nbs=uf_materialize(cx,nb); UF_PROTECT(&nbs);
     for(uint64_t i=nbs->len;i>0;i--) uf_dyn_push(&stack,nbs->data[i-1]);
     UF_UNPROTECT();
@@ -1981,9 +1999,9 @@ static void op_wfind(Ctx*cx){
   uint64_t qi=0; int found=0; Cell result=uf_mki(0);
   while(qi<queue->len&&!found){
     Cell node=queue->data[qi++];
-    pushc(cx,node); uf_call_addr(cx,(const void*)pred.i); Cell k=pop(cx);
+    pushc(cx,node); uf_call_addr(cx,(const void*)pred.i,0); Cell k=pop(cx);
     if(!uf_zero(k)){ result=node; found=1; break; }
-    pushc(cx,node); uf_call_addr(cx,(const void*)f.i); Cell nb=pop(cx);
+    pushc(cx,node); uf_call_addr(cx,(const void*)f.i,0); Cell nb=pop(cx);
     Dyn* nbs=uf_materialize(cx,nb); UF_PROTECT(&nbs);
     for(uint64_t i=0;i<nbs->len;i++){
       Cell v;
@@ -2162,9 +2180,9 @@ static void op_femit(Ctx*cx){
 
 /* ================= error containment ================= */
 static int uf_try_once(Ctx*cx, const void* a, Cell* out){
-  UfTry t; t.prev=uf_try_top; t.sp=cx->sp; t.csp=cx->csp; uf_try_top=&t;
+  UfTry t; t.prev=uf_try_top; t.sp=cx->sp; t.csp=cx->csp; t.local_base=cx->local_base; t.local_fsp=cx->local_fsp; uf_try_top=&t;
   if(setjmp(t.jb)==0){
-    uf_call_addr(cx,a);
+    uf_call_addr(cx,a,0);
     uf_try_top=t.prev;
     Cell r = cx->sp>t.sp ? pop(cx) : uf_mki(0);
     cx->sp=t.sp;
@@ -2174,6 +2192,8 @@ static int uf_try_once(Ctx*cx, const void* a, Cell* out){
   uf_try_top=t.prev;
   cx->sp=t.sp;
   cx->csp=t.csp;
+  cx->local_base=t.local_base;
+  cx->local_fsp=t.local_fsp;
   if(uf_cur_task)((WeaveTask*)uf_cur_task)->tolerated++;
   return 0;
 }
@@ -2200,7 +2220,7 @@ typedef struct { const void* body; Ring* r; } UfSpawn;
 static void* uf_spawn_worker(void* arg){
   UfSpawn* g=(UfSpawn*)arg;
   Ctx* c=ctx_new(1<<16,1<<12);
-  uf_call_addr(c,g->body);
+  uf_call_addr(c,g->body,0);
   Cell r = c->sp>0 ? c->ds[c->sp-1] : uf_mki(0);
   ring_enq(g->r,r);
   ring_close(g->r);
@@ -2223,7 +2243,7 @@ static void op_spawn(Ctx*cx){
    Same as uf_spawn_worker minus the chan — process exit kills these. */
 static void* uf_init_worker(void* arg){
   Ctx* c=ctx_new(1<<16,1<<12);
-  uf_call_addr(c,arg);
+  uf_call_addr(c,arg,0);
   ctx_free(c);
   return 0;
 }

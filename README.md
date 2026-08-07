@@ -73,6 +73,8 @@ Reading the first line left to right:
 
 The `!` suffix stores the top of the stack into a named variable. The `@` suffix
 loads a variable back onto the stack — `lines@` is used in the next two lines.
+In v11, variables are **local** by default (scoped to the current call). Use
+`^name!` / `^name@` for global variables that persist across calls.
 
 That walkthrough covers the execution model. The rest of the language is knowing
 which opcodes exist. There are about 170, each doing one thing. A sample:

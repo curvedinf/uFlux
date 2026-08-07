@@ -1,17 +1,17 @@
 fl:
 drop drop
-first@ not 'proc if
-0 first!
+^first@ not 'proc if
+0 ^first!
 0 ret
 proc:
 7 fatoi units!
 10 fatof total!
-tr@ total@ + tr!
-tu@ units@ + tu!
-rr@ 2 total@ faddto
-pr@ 4 total@ faddto
-cr@ 3 total@ faddto
-rows@ 1 + rows!
+^tr@ total@ + ^tr!
+^tu@ units@ + ^tu!
+^rr@ 2 total@ faddto
+^pr@ 4 total@ faddto
+^cr@ 3 total@ faddto
+^rows@ 1 + ^rows!
 0 ret
 elf:
 k!
@@ -28,25 +28,25 @@ useargv:
 argv 1 get p!
 0 ret
 entry
-0 tr! 0 tu! 0 rows! 1 first!
-dict rr!
-dict pr!
-dict cr!
+0 ^tr! 0 ^tu! 0 ^rows! 1 ^first!
+dict ^rr!
+dict ^pr!
+dict ^cr!
 "bench/data/sales.csv" p!
 argv len 1 gt 'useargv if
 p@ "," 0 'fl fsplit drop
 "=== DATA ANALYTICS RESULTS ===\n" print drop
-rows@ "total_rows: %d\n" print
-tr@ "total_revenue: %.2f\n" print
-tr@ rows@ div "avg_order: %.2f\n" print
-tu@ "total_units: %d\n" print
+^rows@ "total_rows: %d\n" print
+^tr@ "total_revenue: %.2f\n" print
+^tr@ ^rows@ div "avg_order: %.2f\n" print
+^tu@ "total_units: %d\n" print
 "region_" prefix!
-rr@ curdict! rr@ keys rk! rk@ sort rk! rk@ items!
+^rr@ curdict! ^rr@ keys rk! rk@ sort rk! rk@ items!
 6 n! 0 idx! 0 rank! rk@ len 'elf for
 "product_" prefix!
-pr@ curdict! pr@ keys pk! pk@ sort pk! pk@ items!
+^pr@ curdict! ^pr@ keys pk! pk@ sort pk! pk@ items!
 5 n! 0 idx! 0 rank! pk@ len 'elf for
 "country_" prefix!
-cr@ curdict! cr@ keys ck! ck@ sort ck! ck@ items!
+^cr@ curdict! ^cr@ keys ck! ck@ sort ck! ck@ items!
 3 n! 0 idx! 0 rank! ck@ len 'elf for
 ret

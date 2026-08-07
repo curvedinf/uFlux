@@ -24,10 +24,6 @@ m@ len "%d\n" print drop
 "tests/log.txt" 'pl feach
 0 c!
 "tests/log.txt" 0 'countf ffold "%d\n" print drop
-jmp over
-pl: "L: %s\n" print drop 1 ret
-countf: drop inc ret
-over:
 ; fmatch
 "tests/log.txt" "ERROR.*timeout" fmatch fc!
 fc@ deq "%s\n" print drop
@@ -41,13 +37,13 @@ g@ 4 list set
 1 'nb bfs len "%d\n" print drop
 1 'nb dfs len "%d\n" print drop
 1 'nb 'is4 wfind "%d\n" print drop
-jmp over2
-nb: g@ swp getq ret
-is4: 4 eq ret
-over2:
 ; femit
 0 3 range iter 'strf imap "tests/fem.txt" femit "%d\n" print drop
 "tests/fem.txt" slurp "%s" print drop
-jmp over3
+ret
+; --- quotation bodies ---
+pl: "L: %s\n" print drop 1 ret
+countf: drop inc ret
+nb: g@ swp getq ret
+is4: 4 eq ret
 strf: "%d" fmt ret
-over3:

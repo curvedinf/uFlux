@@ -2,7 +2,7 @@
 
 `trans.uf` is the first real program written in µFlux itself: a regex-based
 lexer (the `match` op) plus a hand-rolled recursive-descent parser that reads a
-C source file and prints **v10 text-encoding** µFlux source (per
+C source file and prints **v11 text-encoding** µFlux source (per
 `../SPEC.md`) to stdout.
 
 ## Usage
@@ -55,9 +55,9 @@ live in `tests/` (see `tests/README.md`).
   escapes are only `\n \t \r \0 \\ \"`, and an unknown escape drops the
   backslash. Use numeric codes instead (the test programs compare against
   e.g. 92 for backslash).
-- **No recursion with parameters/locals**: µFlux variable slots are global,
-  so a recursive call clobbers the caller's variables. Recursion in leaf
-  functions without locals works.
+- **No recursion with parameters/locals**: the transpiler emits all variables
+  as globals (`^name`), so a recursive call clobbers the caller's variables.
+  Recursion in leaf functions without locals works.
 - `&&`/`||` do not short-circuit: both sides are evaluated (normalized via
   `not not` then combined with `and`/`or`). Guard out-of-bounds dereferences
   with nested `if`s.
@@ -68,8 +68,9 @@ live in `tests/` (see `tests/README.md`).
   kept in a list (`toks`) of typed records and indexed by position (`pi`).
 - Parser: single-pass, emits µFlux text as it parses — expressions map
   directly onto the stack machine. Every C variable gets a unique global
-  slot `v0, v1, ...` (tracked in a `vars` dict via `getq`/`set`).
-- Control flow emits v10 structured opcodes: `if`/`ifelse`/`while` with
+  slot `v0, v1, ...` (emitted as `^v0!`/`^v0@` in v11 syntax; tracked in
+  a `vars` dict via `getq`/`set`).
+- Control flow emits v11 structured opcodes: `if`/`ifelse`/`while` with
   quotation labels (`'_iN`, `'_cN`, `'_bN`). Each C `if`/`while`/`for`/`do`
   generates condition and body quotations whose labels are defined after the
   calling code. A deferred-output mechanism (`inq` flag + `qout` buffer)
@@ -80,7 +81,7 @@ live in `tests/` (see `tests/README.md`).
 - C comparison operators map directly to v10 native opcodes: `==`→`eq`,
   `!=`→`eq not`, `<`→`lt`, `<=`→`gt not`, `>`→`gt`, `>=`→`lt not`,
   `!`→`not`, `&&`→`not not swp not not and`, `||`→`not not swp not not or`.
-  No helper subroutines are needed (v10 has native comparison opcodes).
+  No helper subroutines are needed (v11 has native comparison opcodes).
 - The emitted program begins with a fixed preamble: the libc IMPORTs,
   `extern "stdout"`, then `entry:` (replacing the old `jmp main`).
 - String-literal escapes in the C input are decoded by the lexer

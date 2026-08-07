@@ -1,5 +1,5 @@
 // ufc — reference µFlux compiler (SPEC.md, whitepaper v7.0)
-// Pipeline: hieroglyph lexer -> parser (labels/macros/structs/imports) -> C codegen -> cc.
+// Pipeline: hieroglyph lexer -> parser (labels/macros/structs/imports/v11 locals) -> C codegen -> cc.
 // Std-only. Modules: ast (types), lex (dense+text lexers), parse, prelude (C runtime), gen (codegen), emit (v9 emitters).
 
 use std::collections::HashMap;
@@ -239,7 +239,7 @@ fn main() {
     let mut emit_toks: Vec<Tok> = Vec::new();
     // the cache key must change whenever the codegen/runtime changes, so fold
     // in the compiler executable's own mtime (rebuild => new cache entries)
-    let mut hash_src = String::from("codegen-rev: v10-gc-fanout\n");
+    let mut hash_src = String::from("codegen-rev: v11-locals-postfix\n");
     if let Ok(exe) = env::current_exe() {
         if let Ok(md) = fs::metadata(&exe) {
             if let Ok(mt) = md.modified() {
