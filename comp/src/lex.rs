@@ -232,7 +232,7 @@ pub fn glyph_type_id(c: char) -> Option<i64> {
 // 196 opcode slots (0..=195). Retired indices use "~NN" placeholders: they
 // have no glyph, no text mnemonic, and no runtime helper — any use is a
 // compile error (unassigned glyph / unknown identifier).
-pub const OP_NAMES: [&str; 203] = [
+pub const OP_NAMES: [&str; 205] = [
     "LIT", "DUP", "OVR", "DRP", "SWP", "PICK", "ADD", "SUB", "MUL", "AND", "SHR", "INC", "DEC",
     "~13", "~14", "~15", "FOR", "CALL", "RET", "OBJ", "GET", "SET", "~22", "ARR", "~24", "~25",
     "CLONE", "CAST", "MACRO", "TENSOR", "~30", "~31", "~32", "SETV", "GETV", "STR", "CAT", "FMT",
@@ -261,7 +261,7 @@ pub const OP_NAMES: [&str; 203] = [
     // v10: additional data ops
     "GROUP", "AGG", "UNIQUE", "FLAT", "CHUNK", "VARGSORT", "VSEARCHSORTED", "VWHERE",
     // v10: large-data shortcuts
-    "MMAP", "FEACH", "FFOLD", "FSPLIT", "FGET", "FATOI", "FATOF", "FMATCH", "BFS", "DFS", "WFIND",
+    "MMAP", "FEACH", "FFOLD", "FSPLIT", "FGET", "FATOI", "FATOF", "FSGET", "FBYTE", "FMATCH", "BFS", "DFS", "WFIND",
     "ADDTO", "FADDTO", "FCOUNT",
     // v10: JSON, iterators, sinks, containment, threads
     "JSON", "UNJSON", "ITER", "NEXT", "COLLECT", "IMAP", "IFILTER", "FEMIT",
@@ -677,7 +677,7 @@ impl Lexer {
                 | "VMAP" | "VFOLD" | "VARGSORT" | "VSEARCHSORTED" | "VWHERE"
                 | "NOW" | "TIME" | "TIMEF" | "BLOOM" | "BTEST" | "SLURP" | "ARGV"
                 | "GROUP" | "AGG" | "UNIQUE" | "FLAT" | "CHUNK"
-                | "MMAP" | "FFOLD" | "FSPLIT" | "FGET" | "FATOI" | "FATOF" | "FMATCH" | "BFS" | "DFS" | "WFIND"
+                | "MMAP" | "FFOLD" | "FSPLIT" | "FGET" | "FATOI" | "FATOF" | "FSGET" | "FBYTE" | "FMATCH" | "BFS" | "DFS" | "WFIND"
                 | "ADDTO" | "FADDTO" | "FCOUNT"
                 | "JSON" | "UNJSON" | "ITER" | "NEXT" | "COLLECT" | "IMAP" | "IFILTER"
                 | "FEMIT" | "TRY" | "RETRY" | "SPAWN"
@@ -1065,7 +1065,7 @@ pub fn text_mnemonic(idx: usize) -> &'static str {
         "CHUNK" => "chunk", "VARGSORT" => "vargsort", "VSEARCHSORTED" => "vsearchsorted",
         "VWHERE" => "vwhere",
         // v10: large-data shortcuts
-        "MMAP" => "mmap", "FEACH" => "feach", "FFOLD" => "ffold", "FSPLIT" => "fsplit", "FGET" => "fget", "FATOI" => "fatoi", "FATOF" => "fatof", "ADDTO" => "addto", "FADDTO" => "faddto", "FCOUNT" => "fcount", "FMATCH" => "fmatch",
+        "MMAP" => "mmap", "FEACH" => "feach", "FFOLD" => "ffold", "FSPLIT" => "fsplit", "FGET" => "fget", "FATOI" => "fatoi", "FATOF" => "fatof", "FSGET" => "fsget", "FBYTE" => "fbyte", "ADDTO" => "addto", "FADDTO" => "faddto", "FCOUNT" => "fcount", "FMATCH" => "fmatch",
         "BFS" => "bfs", "DFS" => "dfs", "WFIND" => "wfind",
         // v10: JSON, iterators, sinks, containment, threads
         "JSON" => "json", "UNJSON" => "unjson", "ITER" => "iter", "NEXT" => "next",

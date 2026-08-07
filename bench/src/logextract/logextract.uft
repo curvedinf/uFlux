@@ -1,16 +1,18 @@
 fl:
-drop drop
-3 fget ":" split 1 get hr!
+nf! drop
+nf@ 10 lt not 'proc if
+0 ret
+proc:
+3 13 2 fsget atoi hr!
 hrs@ hr@ 1 addto
 sc@ 0 fcount
-8 fget 0 get 48 - cls!
-sd@ cls@ fcount
+8 0 fbyte 48 - cls!
+sd@ cls@ 1 addto
 9 fatoi by!
 tb@ by@ + tb!
 tl@ 1 + tl!
 0 ret
 mkp:
-ipk! ipcnt!
 rank@ 1 + rank!
 rank@ ipk@ ipcnt@
 "top_ip_%d: %s (%d)\n" print drop

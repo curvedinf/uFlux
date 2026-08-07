@@ -1,0 +1,81 @@
+import c"sqrt"(float)->float
+av:
+n! v!
+n@ arr float tmp!
+0 i!
+'avcond 'avbody while
+tmp@ ret
+avcond:
+i@ n@ lt ret
+avbody:
+0 sm!
+0 j!
+'avinner 'avinner2 while
+tmp@ i@ sm@ set
+i@ 1 + i!
+0 ret
+avinner:
+j@ n@ lt ret
+avinner2:
+i@ j@ + dup 1 + * 2 div i@ + 1 + ea!
+v@ j@ get ea@ * sm@ + sm!
+j@ 1 + j!
+0 ret
+atv:
+n! v!
+n@ arr float tmp!
+0 i!
+'atcond 'atbody while
+tmp@ ret
+atcond:
+i@ n@ lt ret
+atbody:
+0 sm!
+0 j!
+'atinner 'atinner2 while
+tmp@ i@ sm@ set
+i@ 1 + i!
+0 ret
+atinner:
+j@ n@ lt ret
+atinner2:
+j@ i@ + dup 1 + * 2 div j@ + 1 + ea!
+v@ j@ get ea@ * sm@ + sm!
+j@ 1 + j!
+0 ret
+iucond:
+k@ n@ lt ret
+iubody:
+u@ k@ 1.0 set
+k@ 1 + k!
+0 ret
+itcond:
+i@ 10 lt ret
+itbody:
+u@ n@ call av v!
+v@ n@ call atv u!
+i@ 1 + i!
+0 ret
+scond:
+k@ n@ lt ret
+sbody:
+u@ k@ get v@ k@ get * vbv@ + vbv!
+v@ k@ get v@ k@ get * vv@ + vv!
+k@ 1 + k!
+0 ret
+entry
+5500 n!
+argv len 1 gt 'useargv if
+argv 1 get atoi n!
+useargv:
+n@ arr float u!
+n@ arr float v!
+0 k!
+'iucond 'iubody while
+0 i!
+'itcond 'itbody while
+0 vbv!
+0 vv!
+0 k!
+'scond 'sbody while
+vbv@ vv@ div call sqrt "%.9f\n" print

@@ -242,15 +242,31 @@ pub fn emit_range(
                             }
                         }
                         _ => {
-                            let is_inlined_ffold = *h == "op_ffold" && depth < 8 && inline_ffolds.contains_key(&i);
+                            let is_inlined_ffold = (*h == "op_ffold" || *h == "op_fsplit") && depth < 8 && inline_ffolds.contains_key(&i);
                             if is_inlined_ffold {
                                 if let Some((bs, be)) = inline_ffolds.get(&i).copied() {
                                     vflush(&mut e, &mut vstack, &mut vcache);
-                                    e.push_str("{Cell _ff_acc=pop(cx),_ff_p=pop(cx);FILE*_fp=fopen(uf_sptr(_ff_p),\"r\");if(!_fp)die(\"FFOLD: cannot open file\");char*_line=0;size_t _ncap=0;ssize_t m;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FF_C_");
-                                    e.push_str(&format!("{}{};cx->loops[fr].end=&&K_FF_E_{}{};while((m=getline(&_line,&_ncap,_fp))>=0){{while(m>0&&(_line[m-1]=='\\n'||_line[m-1]=='\\r'))_line[--m]=0;Cell _ls=uf_str_new(_line,(size_t)m);pushc(cx,_ff_acc);pushc(cx,_ls);\n", prefix, i, prefix, i));
-                                    let inner = format!("{}FF{}_", prefix, i);
-                                    emit_range(&mut e, p, targets, inline_fors, inline_ffolds, suppress, ext_idx, bs, be, &inner, depth + 1);
-                                    e.push_str(&format!("K_FF_C_{}{}:;_ff_acc=pop(cx);}}K_FF_E_{}{}:;cx->lsp=fr;free(_line);fclose(_fp);pushc(cx,_ff_acc);}}\n", prefix, i, prefix, i));
+                                    if *h == "op_ffold" {
+                                        /* inlined FFOLD: getline loop + line string + callback */
+                                        e.push_str("{Cell _ff_acc=pop(cx),_ff_p=pop(cx);FILE*_fp=fopen(uf_sptr(_ff_p),\"r\");if(!_fp)die(\"FFOLD: cannot open file\");char*_line=0;size_t _ncap=0;ssize_t m;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FF_C_");
+                                        e.push_str(&format!("{}{};cx->loops[fr].end=&&K_FF_E_{}{};while((m=getline(&_line,&_ncap,_fp))>=0){{while(m>0&&(_line[m-1]=='\\n'||_line[m-1]=='\\r'))_line[--m]=0;Cell _ls=uf_str_new(_line,(size_t)m);pushc(cx,_ff_acc);pushc(cx,_ls);\n", prefix, i, prefix, i));
+                                        let inner = format!("{}FF{}_", prefix, i);
+                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, suppress, ext_idx, bs, be, &inner, depth + 1);
+                                        e.push_str(&format!("K_FF_C_{}{}:;_ff_acc=pop(cx);}}K_FF_E_{}{}:;cx->lsp=fr;free(_line);fclose(_fp);pushc(cx,_ff_acc);}}\n", prefix, i, prefix, i));
+                                    } else {
+                                        /* inlined FSPLIT: getline loop + in-place split + field offsets + callback */
+                                        e.push_str("{Cell _ff_acc=pop(cx),_ff_sep=pop(cx),_ff_p=pop(cx);const char*_E=uf_sptr(_ff_sep);if(!*_E)die(\"FSPLIT: empty separator\");size_t _el=strlen(_E);FILE*_fp=fopen(uf_sptr(_ff_p),\"r\");if(!_fp)die(\"FSPLIT: cannot open file\");char*_line=0;size_t _ncap=0;ssize_t m;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FF_C_");
+                                        e.push_str(&format!("{}{};cx->loops[fr].end=&&K_FF_E_{}{};while((m=getline(&_line,&_ncap,_fp))>=0){{\n", prefix, i, prefix, i));
+                                        /* set up fsplit thread-locals for fget/fatoi/fsget/fbyte */
+                                        e.push_str("while(m>0&&(_line[m-1]=='\\n'||_line[m-1]=='\\r'))_line[--m]=0;\n");
+                                        e.push_str("uf_fsplit_line=_line;uf_fsplit_parent=0;\n");
+                                        e.push_str("uf_fsplit_nfields=0;char*_cur=_line;\n");
+                                        e.push_str("while(uf_fsplit_nfields<128){char*_sp=strstr(_cur,_E);if(!_sp){uf_fsplit_offsets[uf_fsplit_nfields*2]=(int64_t)(_cur-_line);uf_fsplit_offsets[uf_fsplit_nfields*2+1]=(int64_t)strlen(_cur);uf_fsplit_nfields++;break;}*_sp=0;uf_fsplit_offsets[uf_fsplit_nfields*2]=(int64_t)(_cur-_line);uf_fsplit_offsets[uf_fsplit_nfields*2+1]=(int64_t)(_sp-_cur);uf_fsplit_nfields++;_cur=_sp+_el;}\n");
+                                        e.push_str("pushc(cx,_ff_acc);pushi(cx,uf_fsplit_nfields);\n");
+                                        let inner = format!("{}FF{}_", prefix, i);
+                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, suppress, ext_idx, bs, be, &inner, depth + 1);
+                                        e.push_str(&format!("K_FF_C_{}{}:;_ff_acc=pop(cx);}}K_FF_E_{}{}:;cx->lsp=fr;free(_line);fclose(_fp);uf_fsplit_line=0;pushc(cx,_ff_acc);}}\n", prefix, i, prefix, i));
+                                    }
                                 }
                             } else {
                                 vflush(&mut e, &mut vstack, &mut vcache);
@@ -627,6 +643,16 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
                 if let Some(be) = for_body_range(&p.ins, bs) {
                     if inlinable_for(p, bs, be) {
                         inline_ffolds.insert(j, (bs, be));
+                        suppress.insert(j - 1);
+                    }
+                }
+            }
+            // FSPLIT inlining: same pattern as FFOLD
+            if *h == "op_fsplit" && !targets.contains(&(j - 1)) {
+                let bs = resolve(l);
+                if let Some(be) = for_body_range(&p.ins, bs) {
+                    if inlinable_for(p, bs, be) {
+                        inline_ffolds.insert(j, (bs, be)); // reuse the same map
                         suppress.insert(j - 1);
                     }
                 }

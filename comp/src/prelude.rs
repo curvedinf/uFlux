@@ -1788,6 +1788,25 @@ static void op_fatof(Ctx*cx){
   if(idx<0||idx>=uf_fsplit_nfields)die("FATOF: index out of bounds");
   pushf(cx,strtod(uf_fsplit_line+uf_fsplit_offsets[idx*2],0));
 }
+/* FSGET: field_idx offset len -> str_view (zero-alloc substring of a field) */
+static void op_fsget(Ctx*cx){
+  int64_t len=pop(cx).i, off=pop(cx).i, idx=pop(cx).i;
+  if(idx<0||idx>=uf_fsplit_nfields)die("FSGET: index out of bounds");
+  int64_t base=uf_fsplit_offsets[idx*2], flen=uf_fsplit_offsets[idx*2+1];
+  if(off<0||len<0||off+len>flen)die("FSGET: out of bounds");
+  Str* v=(Str*)uf_gc_alloc(sizeof(Str),0);
+  v->tag=HT_STR; v->esz=1; v->len=(uint64_t)len; v->mlen=0;
+  v->mdata=uf_fsplit_line+base+off; v->gc_parent=uf_fsplit_parent;
+  pushp(cx,v);
+}
+/* FBYTE: field_idx offset -> int (single byte from field, no alloc) */
+static void op_fbyte(Ctx*cx){
+  int64_t off=pop(cx).i, idx=pop(cx).i;
+  if(idx<0||idx>=uf_fsplit_nfields)die("FBYTE: index out of bounds");
+  int64_t base=uf_fsplit_offsets[idx*2], flen=uf_fsplit_offsets[idx*2+1];
+  if(off<0||off>=flen)die("FBYTE: out of bounds");
+  pushi(cx,(uint8_t)uf_fsplit_line[base+off]);
+}
 /* ADDTO: dict key amount -> (dict[key] += amount; missing starts at 0) */
 static void op_addto(Ctx*cx){
   Cell v=pop(cx),k=pop(cx),h=pop(cx); Map*m=(Map*)uf_handle(h,"ADDTO");
@@ -1821,8 +1840,12 @@ static void op_faddto(Ctx*cx){
   /* not found: create Str key + insert (must alloc for dict storage) */
   Str* sk=(Str*)uf_gc_alloc(sizeof(Str),0);
   sk->tag=HT_STR; sk->esz=1; sk->len=(uint64_t)flen; sk->mlen=0;
-  sk->mdata=fk; sk->gc_parent=uf_fsplit_parent;
-  map_put(m,uf_mkp(sk),v);
+  sk->mdata=fk; sk->gc_parent=uf_fsplit_parent; /* view into line (valid during callback) */
+  /* For dict storage, copy the key so it survives beyond the callback */
+  Str* sk2=(Str*)uf_gc_alloc(sizeof(Str)+flen+1,0);
+  sk2->tag=HT_STR; sk2->esz=1; sk2->len=(uint64_t)flen; sk2->mlen=0;
+  memcpy(sk2->data,fk,(size_t)flen); sk2->data[flen]=0;
+  map_put(m,uf_mkp(sk2),v);
 }
 /* FCOUNT: dict field_idx -> (dict[field] += 1, no Str alloc on repeat keys) */
 static void op_fcount(Ctx*cx){
@@ -1847,8 +1870,12 @@ static void op_fcount(Ctx*cx){
   }
   Str* sk=(Str*)uf_gc_alloc(sizeof(Str),0);
   sk->tag=HT_STR; sk->esz=1; sk->len=(uint64_t)flen; sk->mlen=0;
-  sk->mdata=fk; sk->gc_parent=uf_fsplit_parent;
-  map_put(m,uf_mkp(sk),uf_mki(1));
+  sk->mdata=fk; sk->gc_parent=uf_fsplit_parent; /* view (valid during callback) */
+  /* Copy key for persistent dict storage */
+  Str* sk2=(Str*)uf_gc_alloc(sizeof(Str)+flen+1,0);
+  sk2->tag=HT_STR; sk2->esz=1; sk2->len=(uint64_t)flen; sk2->mlen=0;
+  memcpy(sk2->data,fk,(size_t)flen); sk2->data[flen]=0;
+  map_put(m,uf_mkp(sk2),uf_mki(1));
 }
 /* FMATCH: path pat -> chan (producer thread streams matching lines, cap 64) */
 typedef struct { Ring* r; char* path; char* pat; } UfFm;
