@@ -185,12 +185,20 @@ pub fn emit_range(
                     "op_sub" => Some("uf_csub"),
                     "op_mul" => Some("uf_cmul"),
                     "op_and" => Some("uf_cand"),
+                    "op_div" => Some("uf_cdiv"),
+                    "op_rem" => Some("uf_crem"),
+                    "op_lt"  => Some("uf_clt"),
+                    "op_gt"  => Some("uf_cgt"),
+                    "op_eq"  => Some("uf_ceq"),
+                    "op_or"  => Some("uf_cor"),
+                    "op_xor" => Some("uf_cxor"),
                     _ => None,
                 };
                 let un = match *h {
                     "op_shr" => Some("uf_cshr"),
                     "op_inc" => Some("uf_cinc"),
                     "op_dec" => Some("uf_cdec"),
+                    "op_not" => Some("uf_cnot"),
                     _ => None,
                 };
                 if let Some(f) = bin {
@@ -243,6 +251,17 @@ pub fn emit_range(
                                 vflush(&mut e, &mut vstack, &mut vcache);
                                 e.push_str("op_swp(cx);");
                             }
+                        }
+                        "op_vget" => {
+                            let idx = vpop(&mut e, &mut vstack, &mut vtmp);
+                            let hh = vpop(&mut e, &mut vstack, &mut vtmp);
+                            vpush(&mut e, &mut vstack, &mut vtmp, format!("uf_cvget({},({}).i)", hh, idx));
+                        }
+                        "op_vset" => {
+                            let v = vpop(&mut e, &mut vstack, &mut vtmp);
+                            let idx = vpop(&mut e, &mut vstack, &mut vtmp);
+                            let hh = vpop(&mut e, &mut vstack, &mut vtmp);
+                            e.push_str(&format!("uf_cvset({},({}).i,{});", hh, idx, v));
                         }
                         _ => {
                             let is_inlined_ffold = (*h == "op_ffold" || *h == "op_fsplit") && depth < 8 && inline_ffolds.contains_key(&i);

@@ -59,6 +59,32 @@ def compile_all():
     rc,t,out,err=run_cmd([str(UF),"-c",str(an_uf_src),"-o",str(an_uf_bin)])
     results["uf_analytics"]=(rc==0,t)
     print(f"  uFlux analytics: {'OK' if rc==0 else 'FAIL'} ({t:.1f}s)")
+    mb_uf_src=BENCH/"src"/"mandelbrot"/"mandelbrot.uft"
+    mb_uf_bin=BENCH/"src"/"mandelbrot"/"mandelbrot_uf"
+    rc,t,out,err=run_cmd([str(UF),"-c",str(mb_uf_src),"-o",str(mb_uf_bin)])
+    results["uf_mandelbrot"]=(rc==0,t)
+    print(f"  uFlux mandelbrot: {'OK' if rc==0 else 'FAIL'} ({t:.1f}s)")
+    mb_cpp_src=BENCH/"src"/"mandelbrot"/"mandelbrot.cpp"
+    mb_cpp_bin=BENCH/"src"/"mandelbrot"/"mandelbrot_cpp"
+    rc,t,out,err=run_cmd(["g++","-std=c++17","-O2","-o",str(mb_cpp_bin),str(mb_cpp_src)])
+    print(f"  C++ mandelbrot: {'OK' if rc==0 else 'FAIL'} ({t:.1f}s)")
+    mb_rs_src=BENCH/"src"/"mandelbrot"/"mandelbrot.rs"
+    mb_rs_bin=BENCH/"src"/"mandelbrot"/"mandelbrot_rs"
+    rc,t,out,err=run_cmd(["rustc","-O","-o",str(mb_rs_bin),str(mb_rs_src)])
+    print(f"  Rust mandelbrot: {'OK' if rc==0 else 'FAIL'} ({t:.1f}s)")
+    sn_uf_src=BENCH/"src"/"spectralnorm"/"spectralnorm.uft"
+    sn_uf_bin=BENCH/"src"/"spectralnorm"/"spectralnorm_uf"
+    rc,t,out,err=run_cmd([str(UF),"-c",str(sn_uf_src),"-o",str(sn_uf_bin)])
+    results["uf_spectralnorm"]=(rc==0,t)
+    print(f"  uFlux spectralnorm: {'OK' if rc==0 else 'FAIL'} ({t:.1f}s)")
+    sn_cpp_src=BENCH/"src"/"spectralnorm"/"spectralnorm.cpp"
+    sn_cpp_bin=BENCH/"src"/"spectralnorm"/"spectralnorm_cpp"
+    rc,t,out,err=run_cmd(["g++","-std=c++17","-O2","-o",str(sn_cpp_bin),str(sn_cpp_src)])
+    print(f"  C++ spectralnorm: {'OK' if rc==0 else 'FAIL'} ({t:.1f}s)")
+    sn_rs_src=BENCH/"src"/"spectralnorm"/"spectralnorm.rs"
+    sn_rs_bin=BENCH/"src"/"spectralnorm"/"spectralnorm_rs"
+    rc,t,out,err=run_cmd(["rustc","-O","-o",str(sn_rs_bin),str(sn_rs_src)])
+    print(f"  Rust spectralnorm: {'OK' if rc==0 else 'FAIL'} ({t:.1f}s)")
     return results
 def run_benchmark(name,cmd,cwd=PROJ,timeout=120):
     print(f"  Running {name}...",end="",flush=True)
@@ -122,6 +148,32 @@ def main():
     an_results.append(run_benchmark("Node.js",["node",str(BENCH/"src"/"analytics"/"analytics.js"),csv_path]))
     an_uf_bin=BENCH/"src"/"analytics"/"analytics_uf"
     an_results.append(run_benchmark("µFlux",[str(an_uf_bin),csv_path],timeout=60))
+
+    # Compute-only benchmarks (no data files; n passed as argv[1])
+    N_MANDEL=1000
+    N_SPECTRAL=5500
+    print(f"\n=== Performance: Mandelbrot (n={N_MANDEL}) ===\n")
+    mb_results=[]
+    mb_cpp_bin=BENCH/"src"/"mandelbrot"/"mandelbrot_cpp"
+    mb_results.append(run_benchmark("C++",[str(mb_cpp_bin),str(N_MANDEL)]))
+    mb_rs_bin=BENCH/"src"/"mandelbrot"/"mandelbrot_rs"
+    mb_results.append(run_benchmark("Rust",[str(mb_rs_bin),str(N_MANDEL)]))
+    mb_results.append(run_benchmark("Python",["python3",str(BENCH/"src"/"mandelbrot"/"mandelbrot.py"),str(N_MANDEL)],timeout=120))
+    mb_results.append(run_benchmark("Node.js",["node",str(BENCH/"src"/"mandelbrot"/"mandelbrot.js"),str(N_MANDEL)],timeout=120))
+    mb_uf_bin=BENCH/"src"/"mandelbrot"/"mandelbrot_uf"
+    mb_results.append(run_benchmark("µFlux",[str(mb_uf_bin),str(N_MANDEL)],timeout=120))
+
+    print(f"\n=== Performance: Spectral Norm (n={N_SPECTRAL}) ===\n")
+    sn_results=[]
+    sn_cpp_bin=BENCH/"src"/"spectralnorm"/"spectralnorm_cpp"
+    sn_results.append(run_benchmark("C++",[str(sn_cpp_bin),str(N_SPECTRAL)]))
+    sn_rs_bin=BENCH/"src"/"spectralnorm"/"spectralnorm_rs"
+    sn_results.append(run_benchmark("Rust",[str(sn_rs_bin),str(N_SPECTRAL)]))
+    sn_results.append(run_benchmark("Python",["python3",str(BENCH/"src"/"spectralnorm"/"spectralnorm.py"),str(N_SPECTRAL)],timeout=300))
+    sn_results.append(run_benchmark("Node.js",["node",str(BENCH/"src"/"spectralnorm"/"spectralnorm.js"),str(N_SPECTRAL)],timeout=300))
+    sn_uf_bin=BENCH/"src"/"spectralnorm"/"spectralnorm_uf"
+    sn_results.append(run_benchmark("µFlux",[str(sn_uf_bin),str(N_SPECTRAL)],timeout=300))
+
     report={
         "date":time.strftime("%Y-%m-%d %H:%M:%S"),
         "data":{
@@ -130,23 +182,42 @@ def main():
         },
         "tokenizer":"Qwen/Qwen3-0.6B (vocab=151643)",
         "tokens":token_data,
-        "performance":{"logextract":le_results,"analytics":an_results},
+        "performance":{"logextract":le_results,"analytics":an_results,
+                        "mandelbrot":mb_results,"spectralnorm":sn_results},
     }
     with open(RESULTS/"benchmark.json","w") as f:
         json.dump(report,f,indent=2)
     print(f"\nResults saved to {RESULTS/'benchmark.json'}")
     print("\n=== SUMMARY ===\n")
-    print(f"{'Language':<10} {'LogExtract tokens':>18} {'Analytics tokens':>18} {'LE Time':>10} {'AN Time':>10}")
-    print("-"*70)
+    perf_mb={r["name"]:r for r in mb_results}
+    perf_sn={r["name"]:r for r in sn_results}
+    print(f"{'Language':<10} {'LogExtract':>12} {'Analytics':>12} {'Mandelbrot':>12} {'SpectralNorm':>14}")
+    print("-"*64)
     perf_le={r["name"]:r for r in le_results}
     perf_an={r["name"]:r for r in an_results}
     for lang in["µFlux","Rust","C++","Python","Node.js"]:
-        lt=token_data[lang]["logextract"]["tokens"]
-        at=token_data[lang]["analytics"]["tokens"]
         le_t=perf_le.get(lang,{}).get("time_sec","N/A")
         an_t=perf_an.get(lang,{}).get("time_sec","N/A")
+        mb_t=perf_mb.get(lang,{}).get("time_sec","N/A")
+        sn_t=perf_sn.get(lang,{}).get("time_sec","N/A")
         le_s=f"{le_t:.3f}s" if isinstance(le_t,float) else le_t
         an_s=f"{an_t:.3f}s" if isinstance(an_t,float) else an_t
-        print(f"{lang:<10} {lt:>18} {at:>18} {le_s:>10} {an_s:>10}")
+        mb_s=f"{mb_t:.3f}s" if isinstance(mb_t,float) else mb_t
+        sn_s=f"{sn_t:.3f}s" if isinstance(sn_t,float) else sn_t
+        print(f"{lang:<10} {le_s:>12} {an_s:>12} {mb_s:>12} {sn_s:>14}")
+    print(f"\n{'Token counts':<10} {'LogExtract':>12} {'Analytics':>12} {'Mandelbrot':>12} {'SpectralNorm':>14}")
+    print("-"*64)
+    sn_src=BENCH/"src"/"spectralnorm"/"spectralnorm.uft"
+    mb_src=BENCH/"src"/"mandelbrot"/"mandelbrot.uft"
+    for lang in["µFlux","Rust","C++","Python","Node.js"]:
+        le_tok=token_data[lang]["logextract"]["tokens"]
+        an_tok=token_data[lang]["analytics"]["tokens"]
+        # mandelbrot/spectralnorm only have µFlux sources for token counting
+        if lang=="µFlux":
+            mb_tok,__=count_tokens(str(mb_src))
+            sn_tok,__=count_tokens(str(sn_src))
+            print(f"{lang:<10} {le_tok:>12} {an_tok:>12} {mb_tok:>12} {sn_tok:>14}")
+        else:
+            print(f"{lang:<10} {le_tok:>12} {an_tok:>12} {'—':>12} {'—':>14}")
 if __name__=="__main__":
     main()

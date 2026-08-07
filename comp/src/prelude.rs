@@ -280,7 +280,16 @@ static inline Cell uf_cand(Cell a,Cell b){ return uf_mki(uf_i(a)&uf_i(b)); }
 static inline Cell uf_cshr(Cell a){ return uf_mki((int64_t)((uint64_t)uf_i(a)>>1)); }
 static inline Cell uf_cinc(Cell a){ if(a.tag==T_FLOAT)return uf_fromf(uf_f(a)+1.0); return uf_mki(uf_i(a)+1); }
 static inline Cell uf_cdec(Cell a){ if(a.tag==T_FLOAT)return uf_fromf(uf_f(a)-1.0); return uf_mki(uf_i(a)-1); }
-static inline int uf_ceq(Cell a,Cell b){ return (a.tag==T_FLOAT||b.tag==T_FLOAT)?uf_f(a)==uf_f(b):uf_i(a)==uf_i(b); }
+static inline Cell uf_cdiv(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT)return uf_fromf(uf_f(a)/uf_f(b)); return uf_mki(uf_i(a)/uf_i(b)); }
+static inline Cell uf_crem(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT)return uf_fromf(fmod(uf_f(a),uf_f(b))); return uf_mki(uf_i(a)%uf_i(b)); }
+static inline Cell uf_clt(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT||a.tag==T_TIME||b.tag==T_TIME)return uf_mki(uf_f(a)<uf_f(b)?1:0); return uf_mki(a.i<b.i?1:0); }
+static inline Cell uf_cgt(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT||a.tag==T_TIME||b.tag==T_TIME)return uf_mki(uf_f(a)>uf_f(b)?1:0); return uf_mki(a.i>b.i?1:0); }
+static inline Cell uf_ceq(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT)return uf_mki(uf_f(a)==uf_f(b)?1:0); return uf_mki(a.i==b.i?1:0); }
+static inline Cell uf_cnot(Cell a){ return uf_mki(uf_zero(a)?1:0); }
+static inline Cell uf_cor(Cell a,Cell b){ return uf_mki(a.i|b.i); }
+static inline Cell uf_cxor(Cell a,Cell b){ return uf_mki(a.i^b.i); }
+static inline Cell uf_cvget(Cell h,int64_t idx){ Hdr*a=(Hdr*)h.i; char*dt=uf_data(a); if(a->ety==1)return uf_mkf(((double*)dt)[idx]); if(a->ety==3)return uf_mki((int64_t)((uint8_t*)dt)[idx]); return uf_mki(((int64_t*)dt)[idx]); }
+static inline void uf_cvset(Cell h,int64_t idx,Cell v){ Hdr*a=(Hdr*)h.i; char*dt=uf_data(a); if(a->ety==1)((double*)dt)[idx]=uf_f(v); else if(a->ety==3)((uint8_t*)dt)[idx]=(uint8_t)v.i; else ((int64_t*)dt)[idx]=v.i; }
 
 /* ---- string access: every core string is a tag-9 Str object; raw char*
    from IMPORTed C functions is still accepted (legacy ptr) ---- */
