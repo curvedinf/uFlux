@@ -636,6 +636,8 @@ pub fn simple_ins(name: &'static str) -> Ins {
         "FATOF" => "op_fatof",
         "FSGET" => "op_fsget",
         "FBYTE" => "op_fbyte",
+        "VGET" => "op_vget",
+        "VSET" => "op_vset",
         "ADDTO" => "op_addto",
         "FADDTO" => "op_faddto",
         "FCOUNT" => "op_fcount",

@@ -1,40 +1,61 @@
 entry
 1000 n!
-argv len 1 gt 'useargv if
-argv 1 get atoi n!
-useargv:
+argv len 1 gt 'setn if
 0 count!
-0 y!
-'ycond 'ybody while
+n@ 'yloop for
 count@ "%d\n" print
 ret
-ycond:
-y@ n@ lt ret
-ybody:
-y@ 2 * n@ div 1.0 - ci!
-0 x!
-'xcond 'xbody while
-y@ 1 + y!
+yloop:
+ki!
+ki@ 2.0 * n@ div 1.0 - ci!
+n@ 'xloop for
 0 ret
-xcond:
-x@ n@ lt ret
-xbody:
-x@ 2 * n@ div 1.5 - cr!
+xloop:
+kj!
+kj@ 2.0 * n@ div 1.5 - cr!
 0.0 zr!
 0.0 zi!
-0 it!
-'icond 'ibody while
-zr@ zr@ * zi@ zi@ * + 4.0 gt not 'inset if
-x@ 1 + x!
+0 esc!
+50 'iloop for
 0 ret
-inset:
-count@ 1 + count!
+iloop:
+esc@ 'ido if
 0 ret
-ibody:
+ido:
+zr@ zr@ * zi@ zi@ * + 4.0 lt 'calc if
+0 ret
+calc:
 zr@ zr@ * zi@ zi@ * - zrn!
 zr@ zi@ 2.0 * * ci@ + zi!
 zrn@ cr@ + zr!
-it@ 1 + it!
 0 ret
-icond:
-it@ 50 lt zr@ zr@ * zi@ zi@ * + 4.0 lt and ret
+setn:
+argv 1 get atoi n!
+0 count!
+n@ 'yloop2 for
+count@ "%d\n" print
+ret
+yloop2:
+ki!
+ki@ 2.0 * n@ div 1.0 - ci!
+n@ 'xloop2 for
+0 ret
+xloop2:
+kj!
+kj@ 2.0 * n@ div 1.5 - cr!
+0.0 zr!
+0.0 zi!
+0 esc!
+50 'iloop2 for
+0 ret
+iloop2:
+esc@ 'ido2 if
+0 ret
+ido2:
+zr@ zr@ * zi@ zi@ * + 4.0 lt 'calc2 if
+0 ret
+calc2:
+zr@ zr@ * zi@ zi@ * - zrn!
+zr@ zi@ 2.0 * * ci@ + zi!
+zrn@ cr@ + zr!
+0 ret

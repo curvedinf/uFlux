@@ -129,6 +129,8 @@ pub fn emit_range(
     targets: &std::collections::HashSet<usize>,
     inline_fors: &HashMap<usize, (usize, usize)>,
     inline_ffolds: &HashMap<usize, (usize, usize)>,
+    inline_whiles: &HashMap<usize, (usize, usize, usize, usize)>,
+    inline_calls: &HashMap<usize, (usize, usize)>,
     suppress: &std::collections::HashSet<usize>,
     ext_idx: &HashMap<&str, usize>,
     start: usize,
@@ -149,6 +151,7 @@ pub fn emit_range(
         }
         e.push_str(&format!("{}: ", plab(prefix, i)));
         if suppress.contains(&i) {
+            if i == 4 { eprintln!("SUPPRESS 4 in emit_range"); }
             // PushAddr feeding an inlined FOR: the address is compile-time
             // known, so the push is elided entirely.
             o.push_str(&e);
@@ -251,7 +254,7 @@ pub fn emit_range(
                                         e.push_str("{Cell _ff_acc=pop(cx),_ff_p=pop(cx);FILE*_fp=fopen(uf_sptr(_ff_p),\"r\");if(!_fp)die(\"FFOLD: cannot open file\");char*_line=0;size_t _ncap=0;ssize_t m;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FF_C_");
                                         e.push_str(&format!("{}{};cx->loops[fr].end=&&K_FF_E_{}{};while((m=getline(&_line,&_ncap,_fp))>=0){{while(m>0&&(_line[m-1]=='\\n'||_line[m-1]=='\\r'))_line[--m]=0;Cell _ls=uf_str_new(_line,(size_t)m);pushc(cx,_ff_acc);pushc(cx,_ls);\n", prefix, i, prefix, i));
                                         let inner = format!("{}FF{}_", prefix, i);
-                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, suppress, ext_idx, bs, be, &inner, depth + 1);
+                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, suppress, ext_idx, bs, be, &inner, depth + 1);
                                         e.push_str(&format!("K_FF_C_{}{}:;_ff_acc=pop(cx);}}K_FF_E_{}{}:;cx->lsp=fr;free(_line);fclose(_fp);pushc(cx,_ff_acc);}}\n", prefix, i, prefix, i));
                                     } else {
                                         /* inlined FSPLIT: getline loop + in-place split + field offsets + callback */
@@ -264,7 +267,7 @@ pub fn emit_range(
                                         e.push_str("while(uf_fsplit_nfields<128){char*_sp=strstr(_cur,_E);if(!_sp){uf_fsplit_offsets[uf_fsplit_nfields*2]=(int64_t)(_cur-_line);uf_fsplit_offsets[uf_fsplit_nfields*2+1]=(int64_t)strlen(_cur);uf_fsplit_nfields++;break;}*_sp=0;uf_fsplit_offsets[uf_fsplit_nfields*2]=(int64_t)(_cur-_line);uf_fsplit_offsets[uf_fsplit_nfields*2+1]=(int64_t)(_sp-_cur);uf_fsplit_nfields++;_cur=_sp+_el;}\n");
                                         e.push_str("pushc(cx,_ff_acc);pushi(cx,uf_fsplit_nfields);\n");
                                         let inner = format!("{}FF{}_", prefix, i);
-                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, suppress, ext_idx, bs, be, &inner, depth + 1);
+                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, suppress, ext_idx, bs, be, &inner, depth + 1);
                                         e.push_str(&format!("K_FF_C_{}{}:;_ff_acc=pop(cx);}}K_FF_E_{}{}:;cx->lsp=fr;free(_line);fclose(_fp);uf_fsplit_line=0;pushc(cx,_ff_acc);}}\n", prefix, i, prefix, i));
                                     }
                                 }
@@ -293,7 +296,7 @@ pub fn emit_range(
                         // BREAK/CONT unwind out of the C loop.
                         e.push_str(&format!("{{int64_t cnt=pop(cx).i;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FC_{}{};cx->loops[fr].end=&&K_FE_{}{};for(int64_t uf_k=0;uf_k<cnt;uf_k++){{pushi(cx,uf_k);\n", prefix, i, prefix, i));
                         let inner = format!("{}F{}_", prefix, i);
-                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, suppress, ext_idx, bs, be, &inner, depth + 1);
+                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, suppress, ext_idx, bs, be, &inner, depth + 1);
                         e.push_str(&format!("K_FC_{}{}:;}}\nK_FE_{}{}:;cx->lsp=fr;}}\n", prefix, i, prefix, i));
                     }
                     None => {
@@ -306,9 +309,18 @@ pub fn emit_range(
             }
             Ins::Call(l) => {
                 vflush(&mut e, &mut vstack, &mut vcache);
-                // Call targets are top-level subroutine labels (outside any
-                // inlined body range), so they are never prefixed; the K_
-                // continuation is local to this copy and is prefixed.
+                if depth < 8 {
+                    if let Some(&(bs, be)) = inline_calls.get(&i) {
+                        // Inlined CALL: emit body inline in a C scope
+                        let inner = format!("{}C{}_", prefix, i);
+                        e.push_str("{\n");
+                        let bbe_trim = if be > bs + 1 && matches!(p.ins[be - 1], Ins::PushI(_)) { be - 1 } else { be };
+                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, suppress, ext_idx, bs, bbe_trim, &inner, depth + 1);
+                        e.push_str("}\n");
+                        o.push_str(&e);
+                        continue;
+                    }
+                }
                 e.push_str(&format!(
                     "cx->cs[cx->csp++]=&&K_{}{};goto L_{};K_{}{}:;\n",
                     prefix,
@@ -348,8 +360,23 @@ pub fn emit_range(
             }
             Ins::While => {
                 vflush(&mut e, &mut vstack, &mut vcache);
-                // dynamic loop frame so BREAK/CONT (possibly nested in CALLed
-                // quotations) can unwind to this loop's end/continue points
+                if depth < 8 {
+                    if let Some((bbs, bbe, cbs, cbe)) = inline_whiles.get(&i).copied() {
+                        let inner_c = format!("{}WC{}_", prefix, i);
+                        let inner_b = format!("{}WB{}_", prefix, i);
+                        e.push_str(&format!("{{long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_WC_{}{};cx->loops[fr].end=&&K_WE_{}{};\n", prefix, i, prefix, i));
+                        e.push_str(&format!("K_WC_{}{}:;{{Cell _wc;{{\n", prefix, i));
+                        let cbe_trim = if cbe > cbs + 1 && matches!(p.ins[cbe - 1], Ins::PushI(_)) { cbe - 1 } else { cbe };
+                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, suppress, ext_idx, cbs, cbe_trim, &inner_c, depth + 1);
+                        e.push_str(&format!("}}_wc=pop(cx);if(uf_zero(_wc))goto K_WE_{}{};\n", prefix, i));
+                        let bbe_trim = if bbe > bbs + 1 && matches!(p.ins[bbe - 1], Ins::PushI(_)) { bbe - 1 } else { bbe };
+                        e.push_str("{\n");
+                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, suppress, ext_idx, bbs, bbe_trim, &inner_b, depth + 1);
+                        e.push_str(&format!("}}goto K_WC_{}{};}}\nK_WE_{}{}:;cx->lsp=fr;}}\n", prefix, i, prefix, i));
+                        o.push_str(&e);
+                        continue;
+                    }
+                }
                 e.push_str(&format!(
                     "{{const void* bod=(const void*)pop(cx).i;const void* cnd=(const void*)pop(cx).i;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;\n\
                      K_WT_{}{}:;cx->loops[fr].cont=&&K_WT_{}{};cx->loops[fr].end=&&K_WE_{}{};\n\
@@ -622,6 +649,8 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
     // path.
     let mut inline_fors: HashMap<usize, (usize, usize)> = HashMap::new();
     let mut inline_ffolds: HashMap<usize, (usize, usize)> = HashMap::new();
+    let mut inline_whiles: HashMap<usize, (usize, usize, usize, usize)> = HashMap::new();
+    let mut inline_calls: HashMap<usize, (usize, usize)> = HashMap::new();
     let mut suppress: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for j in 1..p.ins.len() {
         if let (Ins::PushAddr(l), Ins::For) = (&p.ins[j - 1], &p.ins[j]) {
@@ -658,8 +687,35 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
                 }
             }
         }
+        // CALL inlining: detect Ins::Call(label) where body is inlinable
+        if let Ins::Call(l) = &p.ins[j] {
+            if !targets.contains(&j) {
+                let bs = resolve(l);
+                if let Some(be) = for_body_range(&p.ins, bs) {
+                    if inlinable_for(p, bs, be) {
+                        inline_calls.insert(j, (bs, be));
+                    }
+                }
+            }
+        }
+        // IR order: PushAddr(cond_label) at j-2, PushAddr(body_label) at j-1
+        if j >= 2 {
+            if let (Ins::PushAddr(cl), Ins::PushAddr(bl), Ins::While) = (&p.ins[j - 2], &p.ins[j - 1], &p.ins[j]) {
+                if !targets.contains(&(j - 2)) && !targets.contains(&(j - 1)) {
+                    let bbs = resolve(bl);
+                    let cbs = resolve(cl);
+                    if let (Some(bbe), Some(cbe)) = (for_body_range(&p.ins, bbs), for_body_range(&p.ins, cbs)) {
+                        if inlinable_for(p, bbs, bbe) && inlinable_for(p, cbs, cbe) {
+                            inline_whiles.insert(j, (bbs, bbe, cbs, cbe));
+                            suppress.insert(j - 2);
+                            suppress.insert(j - 1);
+                        }
+                    }
+                }
+            }
+        }
     }
-    emit_range(&mut o, p, &targets, &inline_fors, &inline_ffolds, &suppress, &ext_idx, 0, n, "", 0);
+    emit_range(&mut o, p, &targets, &inline_fors, &inline_ffolds, &inline_whiles, &inline_calls, &suppress, &ext_idx, 0, n, "", 0);
     o.push_str(&format!("L_{}: return;\n}}\n", n));
 
     // exported wrappers (fixed 4-arg C ABI trampoline, run on the main ctx)

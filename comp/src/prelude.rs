@@ -243,7 +243,7 @@ static Ctx main_cx_store = { main_ds, 0, 1<<20, main_cs, 0, 1<<16, {{0,0,0}}, 0,
 static Ctx* main_cx = &main_cx_store;
 int64_t uf_argc=0; void* uf_argv=0; /* program args, reachable via EXTERN "uf_argc"/"uf_argv" + LOADX, or ARGV */
 
-static void pushc(Ctx*cx,Cell c){ if(cx->sp>=cx->dcap)die("stack overflow"); cx->ds[cx->sp++]=c; }
+static inline void pushc(Ctx*cx,Cell c){ if(cx->sp>=cx->dcap)die("stack overflow"); cx->ds[cx->sp++]=c; }
 static inline Cell uf_mki(int64_t v){ Cell c; c.tag=T_INT; c.i=v; return c; }
 static inline Cell uf_mkp(void* v){ Cell c; c.tag=T_PTR; c.i=(int64_t)v; return c; }
 static int uf_is_str(Cell c); /* fwd decl for coercion */
@@ -281,10 +281,10 @@ static Cell uf_str_dup(Cell c){ const char* s=uf_sptr(c); return uf_str_new(s,st
 /* arr element access honors the element type (ety): 0 int (8B), 1 float (8B), 3 byte (1B) */
 static inline Cell uf_cidx(Cell h,int64_t ix){ Hdr*a=(Hdr*)h.i; if(ix<0||(uint64_t)ix>=a->len)die("index out of bounds"); char*dt=uf_data(a); if(a->tag==HT_DYN)return ((Cell*)dt)[ix]; if(a->ety==3)return uf_mki((int64_t)((uint8_t*)dt)[ix]); if(a->ety==1)return uf_mkf(((double*)dt)[ix]); return uf_mki(((int64_t*)dt)[ix]); }
 static inline void uf_cseti(Cell h,int64_t ix,Cell v){ Hdr*a=(Hdr*)h.i; if(ix<0||(uint64_t)ix>=a->len)die("index out of bounds"); char*dt=uf_data(a); if(a->tag==HT_DYN){((Cell*)dt)[ix]=v;return;} if(a->ety==3){((uint8_t*)dt)[ix]=(uint8_t)v.i;return;} if(a->ety==1){((double*)dt)[ix]=uf_f(v);return;} ((int64_t*)dt)[ix]=v.i; }
-static void pushi(Ctx*cx,int64_t v){ pushc(cx,uf_mki(v)); }
-static void pushf(Ctx*cx,double v){ pushc(cx,uf_mkf(v)); }
-static void pushp(Ctx*cx,void* v){ pushc(cx,uf_mkp(v)); }
-static Cell pop(Ctx*cx){ if(cx->sp<=0) die("stack underflow"); return cx->ds[--cx->sp]; }
+static inline void pushi(Ctx*cx,int64_t v){ pushc(cx,uf_mki(v)); }
+static inline void pushf(Ctx*cx,double v){ pushc(cx,uf_mkf(v)); }
+static inline void pushp(Ctx*cx,void* v){ pushc(cx,uf_mkp(v)); }
+static inline Cell pop(Ctx*cx){ if(cx->sp<=0) die("stack underflow"); return cx->ds[--cx->sp]; }
 static void op_nop(Ctx*cx){ (void)cx; }
 
 static void op_dup(Ctx*cx){ if(cx->sp<1)die("stack underflow"); pushc(cx,cx->ds[cx->sp-1]); }
@@ -408,7 +408,7 @@ static void uf_dyn_push_str(Dyn**pd,const char*s,size_t n){ Cell c=uf_str_new(s,
 
 static Hdr* uf_handle(Cell h,const char* op){ if(h.tag!=T_PTR||!h.i)die("handle is null"); Hdr*a=uf_gc_find((void*)h.i); if(!a)die("not a managed handle"); (void)op; return a; }
 /* GET: h k -> v */
-static void op_get(Ctx*cx){
+static inline void op_get(Ctx*cx){
   Cell k=pop(cx),h=pop(cx); Hdr*a=uf_handle(h,"GET");
   switch(a->tag){
     case HT_MAP: { Map*m=(Map*)a; Cell v; if(!map_get(m,k,&v))die("GET: missing key"); pushc(cx,v); return; }
@@ -419,7 +419,7 @@ static void op_get(Ctx*cx){
   }
 }
 /* GETQ: h k -> v_or_0 (never dies on absence; null handle -> 0) */
-static void op_getq(Ctx*cx){
+static inline void op_getq(Ctx*cx){
   Cell k=pop(cx),h=pop(cx);
   if(h.tag!=T_PTR||!h.i){ pushi(cx,0); return; }
   Hdr*a=uf_gc_find((void*)h.i); if(!a)die("GETQ: not a managed handle");
@@ -432,7 +432,7 @@ static void op_getq(Ctx*cx){
   }
 }
 /* SET: h k v -> */
-static void op_set(Ctx*cx){
+static inline void op_set(Ctx*cx){
   Cell v=pop(cx),k=pop(cx),h=pop(cx); Hdr*a=uf_handle(h,"SET");
   switch(a->tag){
     case HT_MAP: map_put((Map*)a,k,v); return;
@@ -441,6 +441,28 @@ static void op_set(Ctx*cx){
     case HT_OBJ: { int64_t o=uf_obj_off(a,k); if(o<0||(uint64_t)o>=a->esz)die("SET: no such field"); *(Cell*)(a->data+o)=v; return; }
     default: die("SET: unsupported handle");
   }
+}
+/* VGET: handle idx -> value (direct typed array read, no handle validation)
+   Bypasses uf_handle/uf_gc_find/tag-switch. Assumes caller knows the handle
+   is a valid arr/tensor. Uses the element type (ety) to do the right read. */
+static void op_vget(Ctx*cx){
+  int64_t idx=pop(cx).i; Cell h=pop(cx);
+  Hdr*a=(Hdr*)h.i;
+  if(idx<0||(uint64_t)idx>=a->len)die("VGET: index out of bounds");
+  char*dt=uf_data(a);
+  if(a->ety==1)pushf(cx,((double*)dt)[idx]);
+  else if(a->ety==3)pushi(cx,(int64_t)((uint8_t*)dt)[idx]);
+  else pushi(cx,((int64_t*)dt)[idx]);
+}
+/* VSET: handle idx value -> (direct typed array write, no handle validation) */
+static void op_vset(Ctx*cx){
+  Cell v=pop(cx); int64_t idx=pop(cx).i; Cell h=pop(cx);
+  Hdr*a=(Hdr*)h.i;
+  if(idx<0||(uint64_t)idx>=a->len)die("VSET: index out of bounds");
+  char*dt=uf_data(a);
+  if(a->ety==1)((double*)dt)[idx]=uf_f(v);
+  else if(a->ety==3)((uint8_t*)dt)[idx]=(uint8_t)v.i;
+  else ((int64_t*)dt)[idx]=v.i;
 }
 /* DEL: h k -> (dict only) */
 static void op_del(Ctx*cx){
