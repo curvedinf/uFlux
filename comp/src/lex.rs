@@ -1,212 +1,92 @@
 use crate::ast::*;
 
 // ---------------- glyph tables ----------------
-pub const OP_BASE: u32 = 0x13000; // v7 alias range U+13000..U+13037 — REMOVED in v10
-pub const VAR_BASE: u32 = 0x13362; // v-space: variable/label name atoms, runs fold
-pub const LIT_BASE: u32 = 0x133A4; // l-space: base-64 digit atoms for self-evaluating numbers
+// Qwen3-BPE-optimized dense encoding: every codepoint below is a single
+// Qwen3-0.6B token, verified via the tokenizer. Ops + v-space + l-space are
+// mutually disjoint.
 pub const DELIM_BASE: u32 = 0x13100;
 pub const TYPE_BASE: u32 = 0x13110;
 
-// v10 opcode glyph table (SPEC_v10_proposal.md; assignments 1:1 and final).
-// Disjoint from v-space, l-space, delimiters (U+13100..13108) and type
-// glyphs (U+13110..13117). Index = opcode index in OP_NAMES.
-// Retired v9 indices (22,24,25,30,31,32,39,57..61,76,77,86,87,151,152) have
-// no glyph and no mnemonic: using them is a compile error.
-pub const CUSTOM_OPS: [(u32, usize); 172] = [
-    (0x13340, 0),  // LIT    𓍀 papyrus scroll — a written constant
-    (0x13050, 1),  // DUP    𓁐 pair — duplicate
-    (0x13051, 2),  // OVR    𓁑 pair variant — second copy
-    (0x130B9, 3),  // DRP    𓂹 falling — drop
-    (0x13161, 4),  // SWP    𓅡 exchange — swap
-    (0x130A9, 5),  // PICK   𓂩 hand — pick
-    (0x1309D, 6),  // ADD    𓂝 arm (D36)
-    (0x1309E, 7),  // SUB    𓂞 arm (D37)
-    (0x130A1, 8),  // MUL    𓂡 arms — multiply
-    (0x130A2, 9),  // AND    𓂢 arms joined
-    (0x130D7, 10), // SHR    𓃗 shift right
-    (0x130A5, 11), // INC    𓂥 arm raised
-    (0x130A6, 12), // DEC    𓂦 arm lowered
-    // indices 13-15 (JMP/JZ/JE) retired in v10.1 — removed from language
-    (0x130BE, 16), // FOR    𓂾 legs in a loop
-    (0x130C0, 17), // CALL   𓃀 foot (D58)
-    (0x130BF, 18), // RET    𓂿 legs returning
-    (0x13250, 19), // OBJ    𓉐 house (O1)
-    (0x13077, 20), // GET    𓁷 eye (D6)
-    (0x13078, 21), // SET    𓁸 eye variant
-    (0x13251, 23), // ARR    𓉑 house row
-    (0x1310E, 26), // CLONE  𓄎 copy
-    (0x1312A, 27), // CAST   𓄪 mold
-    (0x13133, 28), // MACRO  𓄳
-    (0x13253, 29), // TENSOR 𓉓 house grid
-    (0x130A4, 33), // SETV   𓂤 hand storing
-    (0x1307B, 34), // GETV   𓁻 eye fetching
-    (0x1308B, 35), // STR    𓂋 mouth (D21)
-    (0x1308C, 36), // CAT    𓂌 mouth joined
-    (0x1308D, 37), // FMT    𓂍 mouth shaping
-    (0x13256, 38), // BUF    𓉖
-    (0x13258, 40), // BUFCOPY 𓉘
-    (0x1307C, 41), // ADDR   𓁼 pointing
-    (0x13079, 42), // LOADX  𓁹 eye loading
-    (0x1307D, 43), // STOREX 𓁽
-    (0x1307E, 44), // SIZEOF 𓁾 measure
-    (0x1307F, 45), // OFFSET 𓁿
-    (0x13259, 46), // STRUCT 𓉙 house plan
-    (0x1325B, 47), // MALLOC 𓉛
-    (0x1325C, 48), // FREE   𓉜 broken
-    (0x13260, 49), // SYS    𓉠 gate
-    (0x1325D, 50), // GC     𓉝 sweeping
-    (0x1325E, 51), // IMPORT 𓉞 door in
-    (0x1325F, 52), // EXPORT 𓉟 door out
-    (0x13262, 53), // EXTERN 𓉢
-    (0x1308E, 54), // PRINT  𓂎 mouth printing
-    (0x13080, 55), // SCAN   𓂀 eye reading (D4)
-    (0x132B5, 56), // DICT   𓊵 basket — keyed container
-    (0x132B6, 62), // LIST   𓊶 basket row — growable vector
-    (0x130A7, 63), // PUSH   𓂧 arm adding
-    (0x130A8, 64), // POP    𓂨 hand taking
-    (0x132B7, 65), // CHAN   𓊷 vessel — channel
-    (0x130BA, 66), // ENQ    𓂺 legs entering
-    (0x130C1, 67), // DEQ    𓃁 foot leaving
-    (0x13263, 68), // CLOSE  𓉣 door shut
-    (0x132F0, 69), // ATOM   𓋰 indivisible
-    (0x13086, 70), // AGET   𓂆 eye reading atom
-    (0x13087, 71), // ASET   𓂇 eye writing atom
-    (0x1309F, 72), // AADD   𓂟 arm adding to atom
-    (0x130A0, 73), // CAS    𓂠 arms exchanging
-    (0x1312B, 74), // TYPEOF 𓄫 identify mold
-    (0x1312C, 75), // LEN    𓄬 measure length
-    (0x132F9, 78), // USE    𓋹 bringing in a library
-    (0x132F8, 79), // MOD    𓋸 naming the unit
-    (0x132F7, 80), // PUB    𓋷 making public
-    (0x1340D, 81), // WEAVE  𓐍 interlacing threads
-    (0x1340E, 82), // TASK   𓐎 one thread of work
-    (0x1340F, 83), // ENDT   𓐏 thread end
-    (0x13410, 84), // WRUN   𓐐 threads run
-    // ---- shell ----
-    (0x13189, 85), // SH     𓆉 turtle — carries a shell
-    (0x13217, 88), // SHP    𓈗 water — streaming shell
-    (0x131A3, 89), // EXEC   𓆣 scarab — direct exec
-    // ---- strings ----
-    (0x1331C, 90), // MATCH   𓌜 knife — regex cut
-    (0x1331D, 91), // REPLACE 𓌝 knife — regex replace
-    (0x1331E, 92), // RSPLIT  𓌞 knife — regex split
-    (0x1331F, 93), // GLOB   𓌟 blade — filename match
-    (0x13320, 94), // SPLIT  𓌠 blade — cut apart
-    (0x13321, 95), // JOIN   𓌡 blade joined — tie together
-    (0x13322, 96), // SLICE  𓌢 knife slice
-    (0x13323, 97), // FIND   𓌣 tool — seek substring
-    (0x13324, 98), // REPL   𓌤 tool — replace
-    (0x13325, 99), // TRIM   𓌥 knife — shave ends
-    (0x13326, 100), // UP    𓌦 raised tool — uppercase
-    (0x13327, 101), // DOWN  𓌧 lowered tool — lowercase
-    (0x13328, 102), // STARTS 𓌨 head tool — prefix test
-    (0x13329, 103), // ENDS  𓌩 tail tool — suffix test
-    // ---- v10: arithmetic & logic ----
-    (0x1332A, 104), // DIV
-    (0x1332B, 105), // REM
-    (0x1332C, 106), // EQ
-    (0x1332D, 107), // LT
-    (0x1332E, 108), // GT
-    (0x1332F, 109), // NOT
-    (0x13330, 110), // OR
-    (0x13331, 111), // XOR
-    (0x13332, 112), // SHL
-    (0x13333, 113), // BNOT
-    // ---- v10: structured control flow ----
-    (0x13334, 114), // IF
-    (0x13335, 115), // IFELSE
-    (0x13336, 116), // WHILE
-    (0x13337, 117), // BREAK
-    (0x13338, 118), // CONT
-    // ---- v10: container protocol & sequences ----
-    (0x13339, 119), // GETQ
-    (0x1333A, 120), // HAS
-    (0x1333B, 121), // ORELSE
-    (0x1333C, 122), // KEYS
-    (0x1333D, 123), // RANGE
-    (0x1333E, 124), // SORT
-    (0x1333F, 125), // FILTER
-    (0x13400, 126), // SOME
-    (0x13401, 127), // EVERY
-    // ---- v10: vector ops ----
-    (0x13402, 128), // VADD
-    (0x13403, 129), // VSUB
-    (0x13404, 130), // VMUL
-    (0x13405, 131), // VDIV
-    (0x13406, 132), // VEADD
-    (0x13407, 133), // VESUB
-    (0x13408, 134), // VEMUL
-    (0x13409, 135), // VEDIV
-    (0x1340A, 136), // VEMAX
-    (0x1340B, 137), // VEQ
-    (0x1340C, 138), // VLT
-    (0x13411, 139), // VGT
-    (0x13412, 140), // VGE
-    (0x13413, 141), // VLE
-    (0x13414, 142), // VAND
-    (0x13415, 143), // VOR
-    (0x13416, 144), // VNOT
-    (0x13417, 145), // VCOUNT
-    (0x13418, 146), // VGATHER
-    (0x13419, 147), // VSUM
-    (0x1341A, 148), // VMEAN
-    (0x1341B, 149), // VMIN
-    (0x1341C, 150), // VMAX
-    (0x1341E, 152), // DEL (protocol op; spec table gap, free slot/glyph)
-    (0x1341F, 153), // VMAP
-    (0x13420, 154), // VFOLD
-    // ---- v10: time ----
-    (0x13421, 155), // NOW
-    (0x13422, 156), // TIME
-    (0x13423, 157), // TIMEF
-    // ---- v10: bloom ----
-    (0x13424, 158), // BLOOM
-    (0x13425, 159), // BADD
-    (0x13426, 160), // BTEST
-    // ---- v10: script I/O ----
-    (0x13427, 161), // SLURP
-    (0x13428, 162), // SPIT
-    (0x13429, 163), // ARGV
-    // ---- v10: additional data ops ----
-    (0x1342A, 164), // GROUP
-    (0x1342B, 165), // AGG
-    (0x1342C, 166), // UNIQUE
-    (0x1342D, 167), // FLAT
-    (0x1342E, 168), // CHUNK
-    (0x1342F, 169), // VARGSORT
-    (0x13343, 170), // VSEARCHSORTED
-    (0x13344, 171), // VWHERE
-    // ---- v10: large-data shortcuts ----
-    (0x13346, 172), // MMAP
-    (0x13347, 173), // FEACH
-    (0x13348, 174), // FFOLD
-    (0x13349, 175), // FMATCH
-    (0x1334A, 176), // BFS
-    (0x1334B, 177), // DFS
-    (0x1334C, 178), // WFIND
-    // ---- v10: JSON ----
-    (0x1334D, 179), // JSON
-    (0x1334E, 180), // UNJSON
-    // ---- v10: iterators ----
-    (0x1334F, 181), // ITER
-    (0x13350, 182), // NEXT
-    (0x13351, 183), // COLLECT
-    (0x13352, 184), // IMAP
-    (0x13353, 185), // IFILTER
-    (0x13354, 186), // FEMIT
-    // ---- v10: error containment ----
-    (0x13355, 187), // TRY
-    (0x13356, 188), // RETRY
-    // ---- v10: detached threads ----
-    (0x13357, 189), // SPAWN
-    (0x13358, 190), // VEMIN
-    (0x13264, 195), // ENTRY  𓉤 — entry point marker (replaces jmp main)
+// Opcode glyphs (187 live ops). Index = OP_NAMES array position.
+// All colored emoji (U+1F300+), each exactly one Qwen3 token.
+pub const OP_GLYPHS: [u32; 207] = [
+    0x1F300, 0x1F600, 0x1F680, 0x1F90D, 0x1F301, 0x1F601, 0x1F682, 0x1F910,
+    0x1F302, 0x1F602, 0x1F683, 0x1F911, 0x1F303, 0x0, 0x0, 0x0,
+    0x1F603, 0x1F684, 0x1F912, 0x1F304, 0x1F604, 0x1F685, 0x0, 0x1F913,
+    0x0, 0x0, 0x1F305, 0x1F605, 0x1F686, 0x1F914, 0x0, 0x0,
+    0x0, 0x1F306, 0x1F606, 0x1F687, 0x1F915, 0x1F307, 0x1F607, 0x0,
+    0x1F689, 0x1F916, 0x1F308, 0x1F608, 0x1F68A, 0x1F917, 0x1F309, 0x1F609,
+    0x1F68C, 0x1F918, 0x1F30A, 0x1F60A, 0x1F68D, 0x1F919, 0x1F30B, 0x1F60B,
+    0x1F690, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1F91A, 0x1F30C,
+    0x1F60C, 0x1F691, 0x1F91B, 0x1F30D, 0x1F60D, 0x1F692, 0x1F91C, 0x1F30E,
+    0x1F60E, 0x1F693, 0x1F91D, 0x1F30F, 0x0, 0x0, 0x1F60F, 0x1F694,
+    0x1F91E, 0x1F310, 0x1F610, 0x1F695, 0x1F91F, 0x1F311, 0x0, 0x0,
+    0x1F611, 0x1F696, 0x1F920, 0x1F313, 0x1F612, 0x1F697, 0x1F921, 0x1F314,
+    0x1F613, 0x1F698, 0x1F922, 0x1F315, 0x1F614, 0x1F699, 0x1F923, 0x1F318,
+    0x1F615, 0x1F69A, 0x1F924, 0x1F319, 0x1F616, 0x1F69B, 0x1F925, 0x1F31A,
+    0x1F617, 0x1F69C, 0x1F926, 0x1F31B, 0x1F618, 0x1F6A2, 0x1F927, 0x1F31C,
+    0x1F619, 0x1F6A3, 0x1F928, 0x1F31D, 0x1F61A, 0x1F6A6, 0x1F929, 0x1F31E,
+    0x1F61B, 0x1F6A7, 0x1F92A, 0x1F31F, 0x1F61C, 0x1F6A8, 0x1F92B, 0x1F320,
+    0x1F61D, 0x1F6A9, 0x1F92C, 0x1F321, 0x1F61E, 0x1F6AA, 0x1F92D, 0x1F324,
+    0x1F61F, 0x1F6AB, 0x1F92E, 0x1F325, 0x1F620, 0x1F6AC, 0x1F92F, 0x0,
+    0x1F326, 0x1F621, 0x1F6B2, 0x1F930, 0x1F327, 0x1F622, 0x1F6B4, 0x1F931,
+    0x1F328, 0x1F623, 0x1F6B5, 0x1F932, 0x1F329, 0x1F624, 0x1F6B6, 0x1F933,
+    0x1F32A, 0x1F625, 0x1F6B9, 0x1F934, 0x1F32B, 0x1F626, 0x1F6BC, 0x1F935,
+    0x1F32C, 0x1F627, 0x1F6BE, 0x1F936, 0x1F32E, 0x1F628, 0x1F6BF, 0x1F937,
+    0x1F32F, 0x1F629, 0x1F6C0, 0x1F938, 0x1F330, 0x1F62A, 0x1F6C1, 0x1F939,
+    0x1F331, 0x1F62B, 0x1F6CB, 0x1F93D, 0x1F332, 0x1F62C, 0x1F6CC, 0x1F93E,
+    0x1F333, 0x1F62D, 0x1F6CD, 0x1F940, 0x1F334, 0x1F62E, 0x1F6CE,
 ];
 
+// v-space: base-64 digits for variable/label name atoms (colored emoji).
+pub const V_SPACE: [u32; 64] = [
+    0x1F941, 0x1F335, 0x1F62F, 0x1F6CF, 0x1F942, 0x1F336, 0x1F630, 0x1F6D0,
+    0x1F943, 0x1F337, 0x1F631, 0x1F6D1, 0x1F947, 0x1F338, 0x1F632, 0x1F6D2,
+    0x1F948, 0x1F339, 0x1F633, 0x1F6E0, 0x1F949, 0x1F33A, 0x1F634, 0x1F6E1,
+    0x1F94A, 0x1F33B, 0x1F635, 0x1F6E3, 0x1F94B, 0x1F33C, 0x1F636, 0x1F6E4,
+    0x1F950, 0x1F33D, 0x1F637, 0x1F6E9, 0x1F951, 0x1F33E, 0x1F638, 0x1F6EB,
+    0x1F952, 0x1F33F, 0x1F639, 0x1F6EC, 0x1F953, 0x1F340, 0x1F63A, 0x1F6F3,
+    0x1F954, 0x1F341, 0x1F63B, 0x1F6F4, 0x1F955, 0x1F342, 0x1F63C, 0x1F6F5,
+    0x1F956, 0x1F343, 0x1F63D, 0x1F6F6, 0x1F957, 0x1F344, 0x1F63F, 0x1F6F8,
+];
+
+// l-space: base-64 digits for number literals (Enclosed Alphanumeric Supp).
+pub const L_SPACE: [u32; 64] = [
+    0x1F130, 0x1F132, 0x1F136, 0x1F137, 0x1F138, 0x1F13D, 0x1F142, 0x1F145,
+    0x1F150, 0x1F153, 0x1F154, 0x1F156, 0x1F158, 0x1F15A, 0x1F15B, 0x1F15D,
+    0x1F162, 0x1F166, 0x1F170, 0x1F171, 0x1F174, 0x1F176, 0x1F17B, 0x1F17C,
+    0x1F17D, 0x1F17E, 0x1F17F, 0x1F182, 0x1F183, 0x1F186, 0x1F18E, 0x1F192,
+    0x1F193, 0x1F194, 0x1F195, 0x1F196, 0x1F197, 0x1F198, 0x1F199, 0x1F19A,
+    0x1F1E6, 0x1F1E7, 0x1F1E8, 0x1F1E9, 0x1F1EA, 0x1F1EB, 0x1F1EC, 0x1F1ED,
+    0x1F1EE, 0x1F1EF, 0x1F1F0, 0x1F1F1, 0x1F1F2, 0x1F1F3, 0x1F1F4, 0x1F1F5,
+    0x1F1F6, 0x1F1F7, 0x1F1F8, 0x1F1F9, 0x1F1FA, 0x1F1FB, 0x1F1FC, 0x1F1FD,
+];
+
+// --- reverse lookups (cp -> index) ---
+pub fn v_index(cp: u32) -> Option<u32> { V_SPACE.iter().position(|&c| c == cp).map(|i| i as u32) }
+pub fn l_index(cp: u32) -> Option<u32> { L_SPACE.iter().position(|&c| c == cp).map(|i| i as u32) }
+pub fn is_v(cp: u32) -> bool { v_index(cp).is_some() }
+pub fn is_l(cp: u32) -> bool { l_index(cp).is_some() }
+pub fn v_glyph(i: u32) -> char { char::from_u32(V_SPACE[i as usize]).unwrap() }
+pub fn l_glyph(i: u32) -> char { char::from_u32(L_SPACE[i as usize]).unwrap() }
+
+// glyph_of: OP_NAMES array index -> glyph char. Retired indices (~NN) are
+// never looked up (compile error before reaching here).
+pub fn glyph_of(idx: usize) -> char {
+    char::from_u32(OP_GLYPHS[idx]).unwrap()
+}
+// opcode_index: glyph char -> OP_NAMES array index (reverse lookup).
 pub fn opcode_index(c: char) -> Option<usize> {
     let cp = c as u32;
-    CUSTOM_OPS.iter().find(|&&(g, _)| g == cp).map(|&(_, idx)| idx)
+    OP_GLYPHS.iter().position(|&g| g == cp)
 }
+// Kept for emit.rs compatibility (dense glyph for an opcode by name).
+pub fn op_glyph_of(name: &str) -> char {
+    glyph_of(op_index(name).expect("op_index"))
+}
+// DEAD (v10.1): old CUSTOM_OPS table retained as empty placeholder so the
+// const name still exists for any external references.
+pub const CUSTOM_OPS: [(u32, usize); 0] = [];
 
 // U+13110..U+13117 = int float ptr byte void handle str bool.
 // Ids match type_id(): int 0, float 1, ptr 2, byte 3; handle/str are ptr
@@ -365,17 +245,17 @@ impl Lexer {
         }
         s
     }
-    // fold a run of slot glyphs (U+13080..U+130BF) into one name "v0_1_..."
+    // fold a run of v-space slot glyphs into one name "v0_1_..."
     fn fold_slots(&mut self) -> String {
         let mut name = String::from("v");
         let mut first = true;
         while let Some(c) = self.peek() {
             let cp = c as u32;
-            if cp >= VAR_BASE && cp < VAR_BASE + 64 {
+            if let Some(i) = v_index(cp) {
                 if !first {
                     name.push('_');
                 }
-                name.push_str(&(cp - VAR_BASE).to_string());
+                name.push_str(&i.to_string());
                 first = false;
                 self.pos += 1;
             } else {
@@ -384,14 +264,14 @@ impl Lexer {
         }
         name
     }
-    // read a run of l-space digit atoms (U+133A4..U+133E3), big-endian base-64.
+    // read a run of l-space digit atoms, big-endian base-64.
     // Returns the digit values; empty if the next char is not an l-glyph.
     fn lrun(&mut self) -> Vec<u32> {
         let mut ds = Vec::new();
         while let Some(c) = self.peek() {
             let cp = c as u32;
-            if cp >= LIT_BASE && cp < LIT_BASE + 64 {
-                ds.push(cp - LIT_BASE);
+            if let Some(d) = l_index(cp) {
+                ds.push(d);
                 self.pos += 1;
             } else {
                 break;
@@ -499,7 +379,7 @@ impl Lexer {
                 return;
             }
             // ---- l-space: self-evaluating base-64 number ----
-            if cp >= LIT_BASE && cp < LIT_BASE + 64 {
+            if is_l(cp) {
                 out.push(self.lex_lnumber(false));
                 self.pushed = true;
                 continue;
@@ -514,7 +394,7 @@ impl Lexer {
                 };
                 let cp2 = c2 as u32;
                 // v-run name after ^
-                if cp2 >= VAR_BASE && cp2 < VAR_BASE + 64 {
+                if is_v(cp2) {
                     let name = self.fold_slots();
                     self.skip_ws();
                     let g = self.peek();
@@ -552,7 +432,7 @@ impl Lexer {
                 self.err("^ needs a variable name");
             }
             // ---- v-space: variable use or label definition ----
-            if cp >= VAR_BASE && cp < VAR_BASE + 64 {
+            if is_v(cp) {
                 // fold a run of v-glyphs into one name
                 let name = self.fold_slots();
                 self.skip_ws();
@@ -626,7 +506,7 @@ impl Lexer {
                         // sign position: only a negative l-number may follow
                         self.skip_ws();
                         match self.peek() {
-                            Some(g) if (g as u32) >= LIT_BASE && (g as u32) < LIT_BASE + 64 => {
+                            Some(g) if is_l(g as u32) => {
                                 out.push(self.lex_lnumber(true));
                                 self.pushed = true;
                             }
@@ -664,8 +544,8 @@ impl Lexer {
                 self.pushed = false;
                 continue;
             }
-            if cp >= OP_BASE && cp < DELIM_BASE + 9 {
-                self.err(&format!("glyph U+{:04X} is not assigned", cp));
+            if opcode_index(c).is_some() || is_v(cp) || is_l(cp) {
+                self.err(&format!("internal: unhandled glyph U+{:04X}", cp));
             }
             self.err(&format!("unexpected character {:?}", c));
         }
@@ -675,7 +555,7 @@ impl Lexer {
     fn jump_label(&mut self, op: &str) -> String {
         if let Some(c) = self.peek() {
             let cp = c as u32;
-            if cp >= VAR_BASE && cp < VAR_BASE + 64 {
+            if is_v(cp) {
                 return self.fold_slots();
             }
         }
@@ -730,7 +610,7 @@ impl Lexer {
                     // type glyph after LIT: push the type id (like `LIT int`)
                     self.pos += 1;
                     out.push(Tok::PushI(id));
-                } else if cp >= LIT_BASE && cp < LIT_BASE + 64 {
+                } else if is_l(cp) {
                     // l-run number after LIT (same grammar as a bare l-run)
                     out.push(self.lex_lnumber(false));
                 } else if c.is_ascii_alphabetic() {
@@ -860,19 +740,18 @@ impl Lexer {
                             out.push(Tok::Wrun);
                             break;
                         }
-                        Some(g) if ((g as u32) >= VAR_BASE && (g as u32) < VAR_BASE + 64)
-                            || ((g as u32) >= LIT_BASE && (g as u32) < LIT_BASE + 64)
+                        Some(g) if is_v(g as u32) || is_l(g as u32)
                             || opcode_index(g) == Some(82) =>
                         {
                             let mut runs = Vec::new();
                             let mut count: Option<i64> = None;
                             loop {
                                 match self.peek() {
-                                    Some(g2) if (g2 as u32) >= VAR_BASE && (g2 as u32) < VAR_BASE + 64 => {
+                                    Some(g2) if is_v(g2 as u32) => {
                                         runs.push(self.fold_slots());
                                         self.skip_ws();
                                     }
-                                    Some(g2) if (g2 as u32) >= LIT_BASE && (g2 as u32) < LIT_BASE + 64 => {
+                                    Some(g2) if is_l(g2 as u32) => {
                                         if count.is_some() {
                                             self.err("WEAVE: more than one worker count");
                                         }
@@ -888,7 +767,7 @@ impl Lexer {
                             }
                             self.skip_ws();
                             let name = match self.peek() {
-                                Some(g) if (g as u32) >= VAR_BASE && (g as u32) < VAR_BASE + 64 => self.fold_slots(),
+                                Some(g) if is_v(g as u32) => self.fold_slots(),
                                 _ => self.err("WEAVE: task needs a name"),
                             };
                             let mut body = Vec::new();

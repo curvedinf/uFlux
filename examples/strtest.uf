@@ -1,55 +1,7 @@
-; strtest.uf — string ops demo (text encoding), deterministic output
-; word frequency via SPLIT + DICT
-"the cat sat on the mat the cat" " " split ws!
-dict d!
-ws@ len n!
-0 i!
-'wcond 'wbody while
-d@ len "unique=%d\n" print drop
-d@ "the" getq "the=%d\n" print drop
-d@ "cat" getq "cat=%d\n" print drop
-; MATCH: capture-group extraction
-"user=alice id=42" "user=([a-z]+) id=([0-9]+)" match 'rxok 'rxfail ifelse
-; REPLACE: backref word swap
-"hello world" "(h)([a-z]+) (w)([a-z]+)" "\\3\\4 \\1\\2" replace "swap=%s\n" print drop
-; RSPLIT: split on runs of digits
-"a1b22c333d" "[0-9]+" rsplit "|" join "rsplit=%s\n" print drop
-; SLICE: negative indices and clamping
-"abcdef" -3 6 slice "slice1=%s\n" print drop
-"abcdef" 2 -1 slice "slice2=%s\n" print drop
-"abcdef" 4 2 slice "slice3=[%s]\n" print drop
-; GLOB: filename matching
-"main.uf" "*.uf" glob "glob1=%d\n" print drop
-"main.rs" "*.uf" glob "glob2=%d\n" print drop
-"note.txt" "n?te.*" glob "glob3=%d\n" print drop
-; FIND / REPL / TRIM / UP / DOWN / STARTS / ENDS
-"hello world" "world" find "find=%d\n" print drop
-"hello world" "pluto" find "miss=%d\n" print drop
-"a-b-c" "-" "+" repl "repl=%s\n" print drop
-"  padded  " trim "trim=[%s]\n" print drop
-"MiXeD" up "up=%s\n" print drop
-"MiXeD" down "down=%s\n" print drop
-"prefix-body" "prefix" starts "starts=%d\n" print drop
-"prefix-body" "body" ends "ends=%d\n" print drop
-; SPLIT + JOIN round trip
-"x,y,,z" "," split ";" join "sj=%s\n" print drop
-ret
-wcond:
-  i@ n@ - ret
-wbody:
-  ws@ i@ get w!
-  d@ w@ getq dup 'wfound 'wmiss ifelse
-  d@ w@ nv@ set
-  i@ 1 + i!
-  0 ret
-wfound:
-  1 + nv! 0 ret
-wmiss:
-  drop 1 nv! 0 ret
-rxok:
-  dup 1 get "name=%s\n" print drop
-  2 get "id=%s\n" print drop
-  0 ret
-rxfail:
-  drop "match failed\n" print drop
-  0 ret
+"the cat sat on the mat the cat"" "🤡🥁!🚐🌵!🥁@🌏😯!🄰🛏!'🥂'🌶😘🌵@🌏"unique=%d\n"🌋🤍🌵@"the"🌜"the=%d\n"🌋🤍🌵@"cat"🌜"cat=%d\n"🌋🤍"user=alice id=42""user=([a-z]+) id=([0-9]+)"🤠'😰'🛐🌛"hello world""(h)([a-z]+) (w)([a-z]+)""\\3\\4 \\1\\2"🌓"swap=%s\n"🌋🤍"a1b22c333d""[0-9]+"😒"|"🌔"rsplit=%s\n"🌋🤍"abcdef"🌀-3🅂😓"slice1=%s\n"🌋🤍"abcdef"🄶🌀-1😓"slice2=%s\n"🌋🤍"abcdef"🄸 🄶😓"slice3=[%s]\n"🌋🤍"main.uf""*.uf"🚗"glob1=%d\n"🌋🤍"main.rs""*.uf"🚗"glob2=%d\n"🌋🤍"note.txt""n?te.*"🚗"glob3=%d\n"🌋🤍"hello world""world"🚘"find=%d\n"🌋🤍"hello world""pluto"🚘"miss=%d\n"🌋🤍"a-b-c""-""+"🤢"repl=%s\n"🌋🤍"  padded  "🌕"trim=[%s]\n"🌋🤍"MiXeD"😔"up=%s\n"🌋🤍"MiXeD"🚙"down=%s\n"🌋🤍"prefix-body""prefix"🤣"starts=%d\n"🌋🤍"prefix-body""body"🌘"ends=%d\n"🌋🤍"x,y,,z"","🤡";"🌔"sj=%s\n"🌋🤍🤒🥂
+🛏@😯@🤐🤒🌶
+🥁@🛏@😄🥃!🌵@🥃@🌜😀'🌷'😱🌛🌵@🥃@🛑@🚅🛏@🄲🚂🛏!🄰🤒🌷
+🄲🚂🛑!🄰🤒😱
+🤍🄲🛑!🄰🤒😰
+😀🄲😄"name=%s\n"🌋🤍🄶😄"id=%s\n"🌋🤍🄰🤒🛐
+🤍"match failed\n"🌋🤍🄰🤒

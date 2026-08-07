@@ -1,20 +1,5 @@
-; dot.uf — a[i]=i, b[i]=2i for i<1024, dot=714779648
-1024 arr int a! 1024 arr int b!
-0 i!
-'init_cond 'init_body while
-0 dot!
-'sum_cond 'sum_body while
-dot@ "dot=%d\n" print drop
-init_cond:
-  i@ 1024 lt ret
-init_body:
-  a@ i@ i@ set
-  b@ i@ i@ 2 * set
-  i@ 1 + i!
-  0 ret
-sum_cond:
-  i@ 0 gt ret
-sum_body:
-  i@ 1 - i!
-  dot@ a@ i@ get b@ i@ get * + dot!
-  0 ret
+🅢🄰 🄰🌁🤓🥁!🅢🄰 🄰🌁🤓🌵!🄰😯!'🛏'🥂😘🄰🌶!'😰'🛐😘🌶@"dot=%d\n"🌋🤍🛏
+😯@🅢🄰🌙🤒🥂
+🥁@😯@😯@🚅🌵@😯@😯@🄶🌂🚅😯@🄲🚂😯!🄰🤒😰
+😯@🄰😖🤒🛐
+😯@🄲🤐😯!🌶@🥁@😯@😄🌵@😯@😄🌂🚂🌶!🄰🤒
