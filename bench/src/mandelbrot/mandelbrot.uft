@@ -1,32 +1,24 @@
 ; mandelbrot.uft — counts bounded points in the mandelbrot set
-; Avoids if/ifelse inside while bodies; uses arithmetic for control flow
 entry
 1000 n!
 argv len 1 gt 'setn if
 0 count!
-0 ki!
-'ycond 'ybody while
+n@ 'ybody for
 count@ "%d\n" print
 ret
 
-ycond: ki@ n@ lt ret
 ybody:
-  ki@ 2.0 * n@ div 1.0 - ci!
-  0 kj!
-  'xcond 'xbody while
-  ki@ 1 + ki!
+  2.0 * n@ div 1.0 - ci!
+  n@ 'xbody for
   ret
 
-xcond: kj@ n@ lt ret
 xbody:
-  kj@ 2.0 * n@ div 1.5 - cr!
+  2.0 * n@ div 1.5 - cr!
   0.0 zr! 0.0 zi!
   0 ii!
   'icond 'ibody while
-  ; after loop: if point stayed bounded (mag <= 4.0), increment count
   zr@ zr@ * zi@ zi@ * + 4.0 lt
   count@ + count!
-  kj@ 1 + kj!
   ret
 
 icond: ii@ 50 lt zr@ zr@ * zi@ zi@ * + 4.0 lt and ret
@@ -40,7 +32,6 @@ ibody:
 setn:
   argv 1 get atoi n!
   0 count!
-  0 ki!
-  'ycond 'ybody while
+  n@ 'ybody for
   count@ "%d\n" print
   ret

@@ -648,10 +648,18 @@ pub fn emit_range(
             }
             Ins::Ret => {
                 vflush(&mut e, &mut vstack, &mut vcache);
-                // v11: standard RET. The CALL path handles frame restore in the
-                // K_after_call continuation. The uf_call_addr path (try/retry/
-                // exports/callbacks) pushes a NULL return sentinel.
-                e.push_str("{if(cx->csp==0)return;{const void* r=cx->cs[--cx->csp];if(!r)return;goto *r;}}\n")
+                if prefix.starts_with("OB") {
+                    // Inside an outlined function: RET restores the local frame
+                    // and returns to caller. The frame setup/restore is split:
+                    // setup is in the function wrapper, restore is here because
+                    // we need to return from inside the body.
+                    e.push_str("{cx->local_base=cx->local_frames[--cx->local_fsp];return;}\n");
+                } else {
+                    // v11: standard RET. The CALL path handles frame restore in the
+                    // K_after_call continuation. The uf_call_addr path (try/retry/
+                    // exports/callbacks) pushes a NULL return sentinel.
+                    e.push_str("{if(cx->csp==0)return;{const void* r=cx->cs[--cx->csp];if(!r)return;goto *r;}}\n");
+                }
             }
             Ins::Goto(l) => {
                 vflush(&mut e, &mut vstack, &mut vcache);
@@ -1729,9 +1737,9 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
             // Must not call other uf bodies (only externs/simple ops)
             let calls_others = (bs..be).any(|k| matches!(&p.ins[k], Ins::Call(_)));
             if calls_others { continue; }
-            // Must not use PushAddr continuations (which would need the
-            // dispatcher's call-stack mechanism)
-            let has_pushaddr = (bs..be).any(|k| matches!(&p.ins[k], Ins::PushAddr(_)));
+            // Must not have unsuppressed PushAddr (inlined-while PushAddrs are
+            // suppressed and fine — they never use the call-stack mechanism)
+            let has_pushaddr = (bs..be).any(|k| matches!(&p.ins[k], Ins::PushAddr(_)) && !suppress.contains(&k));
             if has_pushaddr { continue; }
             outlined_bodies.insert(j, (bs, be));
             outlined_emitted.insert(bs);
@@ -1751,12 +1759,20 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
         // Emit the body code — use empty reg/arr_ptr maps; the inlined while
         // loops within the body will do their own register caching.
         emit_range(&mut outlined_fns, p, &targets, &inline_fors, &inline_ffolds, &inline_whiles, &inline_calls, &outlined_bodies, &suppress, &ext_idx, bs, be, &ob_prefix, 0, &mut local_types, &ins_body, &HashMap::new(), &numeric_slots, &HashMap::new());
+        // If the body has no explicit RET at the end (shouldn't happen, but
+        // be safe), restore the frame.
         outlined_fns.push_str("cx->local_base=cx->local_frames[--cx->local_fsp];}\n");
     }
-    // Insert outlined functions before uflux_run's declaration
+    // Insert outlined functions after uf_lc but before uflux_run's body
     if !outlined_fns.is_empty() {
-        // Find the insertion point: just before "static void uflux_run"
-        let insert_pos = o.find("\nstatic void uflux_run").unwrap_or(o.len());
+        // Find the uflux_run function definition (not the forward declaration).
+        // The forward declaration is "static void uflux_run(Ctx*cx, long pc);"
+        // while the definition is "static void uflux_run(Ctx*cx, long pc){".
+        let search = "static void uflux_run(Ctx*cx, long pc){";
+        let insert_pos = o.find(search).unwrap_or_else(|| {
+            // Fallback: find the last occurrence of uflux_run
+            o.rfind("static void uflux_run").unwrap_or(o.len())
+        });
         o.insert_str(insert_pos, &outlined_fns);
     }
     emit_range(&mut o, p, &targets, &inline_fors, &inline_ffolds, &inline_whiles, &inline_calls, &outlined_bodies, &suppress, &ext_idx, 0, n, "", 0, &mut local_types, &ins_body, &HashMap::new(), &numeric_slots, &HashMap::new());
