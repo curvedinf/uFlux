@@ -12,21 +12,29 @@ proc:
 ^tb@ by@ + ^tb!
 ^tl@ 1 + ^tl!
 0 ret
-mkp:
+toppick:
+drop
+-1 bestv! "" bestk!
+iplist@ len 'scanip for
 rank@ 1 + rank!
-rank@ ipk@ ipcnt@
+rank@ bestk@ ^sc@ bestk@ getq
 "top_ip_%d: %s (%d)\n" print drop
+^sel@ bestk@ 1 addto
+ret
+scanip:
+k!
+iplist@ k@ get name!
+^sel@ name@ getq not 'schk if
+ret
+schk:
+^sc@ name@ getq v!
+v@ bestv@ gt 'supd if
 0 ret
+supd: v@ bestv! name@ bestk! 0 ret
 hpf:
 k!
 ^hrs@ k@ getq hv!
 k@ hv@ "hour_%02d: %d\n" print drop
-ret
-ipf:
-k!
-iplist@ k@ get ipk!
-^sc@ ipk@ getq ipcnt!
-rank@ 10 lt 'mkp if
 ret
 useargv:
 argv 1 get p!
@@ -47,7 +55,8 @@ p@ " " 0 'fl fsplit drop
 ^sd@ 4 getq "status_4xx: %d\n" print drop
 ^sd@ 5 getq "status_5xx: %d\n" print drop
 24 'hpf for
+dict ^sel!
 ^sc@ keys iplist!
 iplist@ sort iplist!
-iplist@ len 'ipf for
+10 'toppick for
 ret

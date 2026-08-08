@@ -243,6 +243,19 @@ pub fn inlinable_for(p: &Parsed, bs: usize, be: usize) -> bool {
     true
 }
 
+// A label whose body (up to its first RET) is only BREAK/CONT is a trivial
+// loop-exit continuation: `cond 'exit if` can be compiled as a direct
+// conditional break/cont with no code-address push and no indirect jump.
+pub fn trivial_loop_exit(p: &Parsed, l: &str) -> bool {
+    match p.labels.get(l) {
+        Some(&tb) => match for_body_range(&p.ins, tb) {
+            Some(tbe) => tbe > tb && (tb..tbe).all(|k| matches!(p.ins[k], Ins::Break | Ins::Cont)),
+            None => false,
+        },
+        None => false,
+    }
+}
+
 // Emit instructions [start, end) as C, prefixing every label (including K_
 // continuations) with `prefix` — used to inline FOR bodies as renamed copies
 // so their internal jumps stay local to the copy.
@@ -300,6 +313,16 @@ pub fn emit_range(
                 vpush_cell(&mut e, &mut vstack, &mut vtmp, &format!("uf_mkp((void*)&uf_sl{})", idx));
             }
             Ins::PushAddr(l) => {
+                // Peephole (with the Ins::If arm): `'exit if` where `exit` is
+                // a trivial loop exit emits no address push — the If compiles
+                // to a direct conditional break/cont.
+                if matches!(p.ins.get(i + 1), Some(Ins::If))
+                    && trivial_loop_exit(p, l)
+                    && !targets.contains(&i)
+                {
+                    o.push_str(&e);
+                    continue;
+                }
                 vflush(&mut e, &mut vstack, &mut vcache);
                 // The target may live outside an inlined body range (e.g. a
                 // nested FOR body); only in-range targets get the prefix.
@@ -565,7 +588,7 @@ pub fn emit_range(
                                         e.push_str(&format!("{}{};cx->loops[fr].end=&&K_FF_E_{}{};while((m=getline(&_line,&_ncap,_fp))>=0){{\n", prefix, i, prefix, i));
                                         /* set up fsplit thread-locals for fget/fatoi/fsget/fbyte */
                                         e.push_str("while(m>0&&(_line[m-1]=='\\n'||_line[m-1]=='\\r'))_line[--m]=0;\n");
-                                        e.push_str("uf_fsplit_line=_line;uf_fsplit_parent=0;\n");
+                                        e.push_str("uf_fsplit_line=_line;uf_fsplit_parent=(Hdr*)_line;\n");
                                         e.push_str("uf_fsplit_nfields=0;char*_cur=_line;\n");
                                         e.push_str("while(uf_fsplit_nfields<128){char*_sp=strstr(_cur,_E);if(!_sp){uf_fsplit_offsets[uf_fsplit_nfields*2]=(int64_t)(_cur-_line);uf_fsplit_offsets[uf_fsplit_nfields*2+1]=(int64_t)strlen(_cur);uf_fsplit_nfields++;break;}*_sp=0;uf_fsplit_offsets[uf_fsplit_nfields*2]=(int64_t)(_cur-_line);uf_fsplit_offsets[uf_fsplit_nfields*2+1]=(int64_t)(_sp-_cur);uf_fsplit_nfields++;_cur=_sp+_el;}\n");
                                         e.push_str("pushc(cx,_ff_acc);pushi(cx,uf_fsplit_nfields);\n");
@@ -597,10 +620,97 @@ pub fn emit_range(
                         // on the real ds per iteration, exactly as the
                         // subroutine path does. A dynamic loop frame lets
                         // BREAK/CONT unwind out of the C loop.
-                        e.push_str(&format!("{{int64_t cnt=pop(cx).i;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FC_{}{};cx->loops[fr].end=&&K_FE_{}{};for(int64_t uf_k=0;uf_k<cnt;uf_k++){{pushi(cx,uf_k);\n", prefix, i, prefix, i));
+                        //
+                        // Register-cache typed locals across the loop (same
+                        // scheme as inlined WHILE): safe when the body makes
+                        // no calls and takes no indirect jumps except IFs
+                        // whose continuation is a trivial loop exit
+                        // (break/cont then ret) that never touches locals.
+                        let mut reg: HashMap<usize, (String, VType)> = HashMap::new();
+                        {
+                            let trivial_exit = |tb: usize| -> bool {
+                                match for_body_range(&p.ins, tb) {
+                                    Some(tbe) => (tb..tbe).all(|k| {
+                                        matches!(p.ins[k], Ins::Break | Ins::Cont)
+                                    }),
+                                    None => false,
+                                }
+                            };
+                            let escapable = (bs..be).any(|k| match &p.ins[k] {
+                                Ins::Call(_) | Ins::CallExt(_) | Ins::Sys(_) |
+                                Ins::Weave(_) | Ins::Send | Ins::Goto(_) | Ins::While | Ins::For => true,
+                                Ins::If => {
+                                    if k > bs {
+                                        match &p.ins[k - 1] {
+                                            Ins::PushAddr(l) => {
+                                                match p.labels.get(l) {
+                                                    Some(&tb) => !trivial_exit(tb),
+                                                    None => true,
+                                                }
+                                            }
+                                            _ => true,
+                                        }
+                                    } else {
+                                        true
+                                    }
+                                }
+                                Ins::PushAddr(_) => {
+                                    // allowed only when feeding a checked If
+                                    !matches!(p.ins.get(k + 1), Some(Ins::If))
+                                }
+                                Ins::Simple(h) => *h == "op_ffold" || *h == "op_fsplit",
+                                _ => false,
+                            });
+                            if !escapable {
+                                for k in bs..be {
+                                    let id = match &p.ins[k] {
+                                        Ins::LocalGetI(id) | Ins::LocalSetI(id) => *id,
+                                        _ => continue,
+                                    };
+                                    if reg.contains_key(&id) { continue; }
+                                    let key = ins_body[k] * 1000000 + id;
+                                    let ty = local_types.get(&key).copied().unwrap_or(VType::Unknown);
+                                    if ty == VType::Int || ty == VType::Float {
+                                        reg.insert(id, (format!("_r{}", id), ty));
+                                    } else if numeric.contains(&key) {
+                                        // Proven numeric-only slot: cache as a
+                                        // plain Cell C local (no pointers, so
+                                        // GC-safe), skipping the locals memory
+                                        reg.insert(id, (format!("_r{}", id), VType::Unknown));
+                                    }
+                                }
+                            }
+                        }
+                        let mut regs: Vec<_> = reg.iter().collect();
+                        regs.sort_by_key(|(id, _)| *id);
+                        e.push_str(&format!("{{int64_t cnt=pop(cx).i;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FC_{}{};cx->loops[fr].end=&&K_FE_{}{};\n", prefix, i, prefix, i));
+                        for (id, (name, ty)) in &regs {
+                            match ty {
+                                VType::Int => e.push_str(&format!("int64_t {}=uf_i(cx->locals[cx->local_base+{}]);\n", name, id)),
+                                VType::Float => e.push_str(&format!("double {}=uf_f(cx->locals[cx->local_base+{}]);\n", name, id)),
+                                _ => e.push_str(&format!("Cell {}=cx->locals[cx->local_base+{}];\n", name, id)),
+                            }
+                        }
+                        // If the body immediately DROPs the pushed iteration
+                        // index, skip both the push and the drop.
+                        let skip_idx = matches!(&p.ins[bs], Ins::Simple(h) if *h == "op_drp");
+                        if skip_idx {
+                            e.push_str("for(int64_t uf_k=0;uf_k<cnt;uf_k++){\n");
+                        } else {
+                            e.push_str("for(int64_t uf_k=0;uf_k<cnt;uf_k++){pushi(cx,uf_k);\n");
+                        }
+                        let eff_bs = if skip_idx { bs + 1 } else { bs };
                         let inner = format!("{}F{}_", prefix, i);
-                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, outlined_bodies, suppress, ext_idx, bs, be, &inner, depth + 1, local_types, ins_body, &HashMap::new(), &std::collections::HashSet::new(), &HashMap::new());
-                        e.push_str(&format!("K_FC_{}{}:;}}\nK_FE_{}{}:;cx->lsp=fr;}}\n", prefix, i, prefix, i));
+                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, outlined_bodies, suppress, ext_idx, eff_bs, be, &inner, depth + 1, local_types, ins_body, &reg, numeric, &HashMap::new());
+                        e.push_str(&format!("K_FC_{}{}:;}}\nK_FE_{}{}:;", prefix, i, prefix, i));
+                        for (id, (name, ty)) in &regs {
+                            match ty {
+                                VType::Int => e.push_str(&format!("cx->locals[cx->local_base+{}]=uf_mki({});", id, name)),
+                                VType::Float => e.push_str(&format!("cx->locals[cx->local_base+{}]=uf_mkf({});", id, name)),
+                                _ => e.push_str(&format!("cx->locals[cx->local_base+{}]={};", id, name)),
+                            }
+                        }
+                        e.push_str("cx->lsp=fr;}\n");
                     }
                     None => {
                         e.push_str(&format!(
@@ -672,6 +782,30 @@ pub fn emit_range(
             // v10 structured control flow: operands are code addresses on the
             // ds, CALLed via the threaded call stack (like FOR's path).
             Ins::If => {
+                // Peephole (with the Ins::PushAddr arm): `'exit if` where
+                // `exit`'s body is only break/cont becomes a direct
+                // conditional loop exit — the condition stays a C expression
+                // (no ds round trip) and no continuation is pushed.
+                if i > start {
+                    if let Ins::PushAddr(l) = &p.ins[i - 1] {
+                        if trivial_loop_exit(p, l) && !targets.contains(&(i - 1)) {
+                            let tb = resolve(l);
+                            let is_break = matches!(p.ins[tb], Ins::Break);
+                            let c = vpop(&mut e, &mut vstack, &mut vtmp);
+                            let test = match c.ty {
+                                VType::Int | VType::Float => format!("({})!=0", c.expr),
+                                _ => format!("!uf_zero({})", c.expr),
+                            };
+                            if is_break {
+                                e.push_str(&format!("if({}){{if(cx->lsp<=0)die(\"break outside loop\");cx->lsp--;cx->csp=cx->loops[cx->lsp].cspl;goto *cx->loops[cx->lsp].end;}}\n", test));
+                            } else {
+                                e.push_str(&format!("if({}){{if(cx->lsp<=0)die(\"cont outside loop\");cx->csp=cx->loops[cx->lsp-1].cspl;goto *cx->loops[cx->lsp-1].cont;}}\n", test));
+                            }
+                            o.push_str(&e);
+                            continue;
+                        }
+                    }
+                }
                 vflush(&mut e, &mut vstack, &mut vcache);
                 e.push_str(&format!(
                     "{{const void* b=(const void*)pop(cx).i;Cell c=pop(cx);if(!uf_zero(c)){{cx->cs[cx->csp++]=&&K_{}{};goto *b;K_{}{}:;pop(cx);}}}}\n",

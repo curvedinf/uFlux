@@ -307,9 +307,29 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
         let resolve = |l: &String| -> Option<usize> { p.labels.get(l).copied() };
         for (i, ins) in p.ins.iter().enumerate() {
             match ins {
-                Ins::Call(l) | Ins::PushAddr(l) => {
+                Ins::Call(l) => {
                     if let Some(t) = resolve(l) {
                         entries.insert(t);
+                    }
+                }
+                Ins::PushAddr(l) => {
+                    // A PushAddr that directly feeds a control-flow op
+                    // (if/ifelse/while/for) is a continuation of the current
+                    // body, not a new function entry: it runs in the caller's
+                    // frame, so break/cont inside it bind to the caller's
+                    // loop. Everything else (stored/computed addresses)
+                    // starts a new entry.
+                    let feeds_cf = match p.ins.get(i + 1) {
+                        Some(Ins::If) | Some(Ins::IfElse) | Some(Ins::For) | Some(Ins::While) => true,
+                        Some(Ins::PushAddr(_)) => {
+                            matches!(p.ins.get(i + 2), Some(Ins::While) | Some(Ins::IfElse))
+                        }
+                        _ => false,
+                    };
+                    if !feeds_cf {
+                        if let Some(t) = resolve(l) {
+                            entries.insert(t);
+                        }
                     }
                 }
                 Ins::Weave(ms) => {
@@ -349,7 +369,7 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
         }
         let mut cur_fn: Option<usize> = None;
         for (i, ins) in p.ins.iter().enumerate() {
-            if entries.contains(&i) {
+            if entries.contains(&i) || loop_bodies.contains(&i) {
                 cur_fn = Some(i);
             }
             if matches!(ins, Ins::Break | Ins::Cont) {

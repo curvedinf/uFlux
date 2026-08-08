@@ -13,17 +13,24 @@ proc:
 ^cr@ 3 total@ faddto
 ^rows@ 1 + ^rows!
 0 ret
-elf:
-k!
-items@ k@ get name!
-curdict@ name@ getq val!
-idx@ n@ lt 'doemit if
-idx@ 1 + idx!
+selmax:
+drop
+-1.0 bestv! "" bestk!
+kl@ len 'selscan for
+rank@ 1 + rank!
+prefix@ rank@ bestk@ curdict@ bestk@ getq "%s%d: %s $%.2f\n" print drop
+^sel@ bestk@ 1 addto
 ret
-doemit:
-idx@ 1 + rank!
-prefix@ rank@ name@ val@ "%s%d: %s $%.2f\n" print drop
+selscan:
+k!
+kl@ k@ get name!
+^sel@ name@ getq not 'selchk if
+ret
+selchk:
+curdict@ name@ getq v!
+v@ bestv@ gt 'selupd if
 0 ret
+selupd: v@ bestv! name@ bestk! 0 ret
 useargv:
 argv 1 get p!
 0 ret
@@ -41,12 +48,12 @@ p@ "," 0 'fl fsplit drop
 ^tr@ ^rows@ div "avg_order: %.2f\n" print
 ^tu@ "total_units: %d\n" print
 "region_" prefix!
-^rr@ curdict! ^rr@ keys rk! rk@ sort rk! rk@ items!
-6 n! 0 idx! 0 rank! rk@ len 'elf for
+^rr@ curdict! ^rr@ keys rk! rk@ sort rk! rk@ kl!
+dict ^sel! 0 rank! 6 'selmax for
 "product_" prefix!
-^pr@ curdict! ^pr@ keys pk! pk@ sort pk! pk@ items!
-5 n! 0 idx! 0 rank! pk@ len 'elf for
+^pr@ curdict! ^pr@ keys pk! pk@ sort pk! pk@ kl!
+dict ^sel! 0 rank! 5 'selmax for
 "country_" prefix!
-^cr@ curdict! ^cr@ keys ck! ck@ sort ck! ck@ items!
-3 n! 0 idx! 0 rank! ck@ len 'elf for
+^cr@ curdict! ^cr@ keys ck! ck@ sort ck! ck@ kl!
+dict ^sel! 0 rank! 3 'selmax for
 ret
