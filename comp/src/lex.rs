@@ -145,7 +145,7 @@ pub const OP_NAMES: [&str; 212] = [
     // v10: large-data shortcuts
     "MMAP", "FEACH", "FFOLD", "FSPLIT", "FGET", "FATOI", "FATOF", "FSGET", "FBYTE", "FMATCH", "BFS", "DFS", "WFIND",
     "VGET", "VSET",
-    "ADDTO", "FADDTO", "FCOUNT",
+    "ADDTO", "FADDTO", "FINC",
     // v10: JSON, iterators, sinks, containment, threads
     "JSON", "UNJSON", "ITER", "NEXT", "COLLECT", "IMAP", "IFILTER", "FEMIT",
     "TRY", "RETRY", "SPAWN", "VEMIN",
@@ -331,7 +331,7 @@ pub fn op_usage(name: &str) -> &'static str {
         "VSET" => "h idx v → | direct typed array write",
         "ADDTO" => "dict key amount → | dict[key] += amount",
         "FADDTO" => "dict field_idx amount → | dict[field] += amount",
-        "FCOUNT" => "path → count | count lines in file",
+        "FINC" => "dict field_idx → | dict[field] += 1",
         "JSON" => "str → v | parse JSON",
         "UNJSON" => "v → str | serialize JSON",
         "ITER" => "h → it | create cursor",
@@ -802,7 +802,7 @@ impl Lexer {
                 | "NOW" | "TIME" | "TIMEF" | "BLOOM" | "BTEST" | "SLURP" | "ARGV"
                 | "GROUP" | "AGG" | "UNIQUE" | "FLAT" | "CHUNK"
                 | "MMAP" | "FFOLD" | "FSPLIT" | "FGET" | "FATOI" | "FATOF" | "FSGET" | "FBYTE" | "FMATCH" | "BFS" | "DFS" | "WFIND"
-                | "ADDTO" | "FADDTO" | "FCOUNT"
+                | "ADDTO" | "FADDTO" | "FINC"
                 | "VGET" | "VSET"
                 | "JSON" | "UNJSON" | "ITER" | "NEXT" | "COLLECT" | "IMAP" | "IFILTER"
                 | "FEMIT" | "TRY" | "RETRY" | "SPAWN"
@@ -1204,7 +1204,7 @@ pub fn text_mnemonic(idx: usize) -> &'static str {
         "CHUNK" => "chunk", "VARGSORT" => "vargsort", "VSEARCHSORTED" => "vsearchsorted",
         "VWHERE" => "vwhere",
         // v10: large-data shortcuts
-        "MMAP" => "mmap", "FEACH" => "feach", "FFOLD" => "ffold", "FSPLIT" => "fsplit", "FGET" => "fget", "FATOI" => "fatoi", "FATOF" => "fatof", "FSGET" => "fsget", "FBYTE" => "fbyte", "VGET" => "vget", "VSET" => "vset", "ADDTO" => "addto", "FADDTO" => "faddto", "FCOUNT" => "fcount", "FMATCH" => "fmatch",
+        "MMAP" => "mmap", "FEACH" => "feach", "FFOLD" => "ffold", "FSPLIT" => "fsplit", "FGET" => "fget", "FATOI" => "fatoi", "FATOF" => "fatof", "FSGET" => "fsget", "FBYTE" => "fbyte", "VGET" => "vget", "VSET" => "vset", "ADDTO" => "addto", "FADDTO" => "faddto", "FINC" => "finc", "FMATCH" => "fmatch",
         "BFS" => "bfs", "DFS" => "dfs", "WFIND" => "wfind",
         // v10: JSON, iterators, sinks, containment, threads
         "JSON" => "json", "UNJSON" => "unjson", "ITER" => "iter", "NEXT" => "next",

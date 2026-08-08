@@ -5,7 +5,7 @@ nf@ 10 lt not 'proc if
 proc:
 3 13 2 fsget atoi hr!
 ^hrs@ hr@ 1 addto
-^sc@ 0 fcount
+^sc@ 0 finc
 8 0 fbyte 48 - cls!
 ^sd@ cls@ 1 addto
 9 fatoi by!

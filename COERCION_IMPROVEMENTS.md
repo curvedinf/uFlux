@@ -166,9 +166,9 @@ Only when the *result* is genuinely undefined, never on input type:
 `mmap` `slurp` `spit` — str (path)
 `feach` `ffold` `fsplit` — str (path) + fn
 `fget` `fatoi` `fatof` `fsget` `fbyte` — field_idx
-`fcount` `fmatch` `femit` — str (path)
+`fmatch` `femit` — str (path)
 `bfs` `dfs` `wfind` — node + fn
-`addto` `faddto` — dict
+`addto` `faddto` `finc` — dict
 `json` — str
 `unjson` — any value
 `iter` `next` `collect` `imap` `ifilter` — iterator

@@ -2016,11 +2016,11 @@ static void op_faddto(Ctx*cx){
   memcpy(sk2->data,fk,(size_t)flen); sk2->data[flen]=0;
   map_put(m,uf_mkp(sk2),v);
 }
-/* FCOUNT: dict field_idx -> (dict[field] += 1, no Str alloc on repeat keys) */
-static void op_fcount(Ctx*cx){
+/* FINC: dict field_idx -> (dict[field] += 1, no Str alloc on repeat keys) */
+static void op_finc(Ctx*cx){
   int64_t idx=pop(cx).i; Cell h=pop(cx);
-  Map*m=(Map*)uf_handle(h,"FCOUNT");
-  if(idx<0||idx>=uf_fsplit_nfields)die("FCOUNT: field index out of bounds");
+  Map*m=(Map*)uf_handle(h,"FINC");
+  if(idx<0||idx>=uf_fsplit_nfields)die("FINC: field index out of bounds");
   const char* fk=uf_fsplit_line+uf_fsplit_offsets[idx*2];
   int64_t flen=uf_fsplit_offsets[idx*2+1];
   uint64_t fh=uf_fnv(fk,(uint64_t)flen);

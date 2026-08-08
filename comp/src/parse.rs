@@ -855,7 +855,7 @@ pub fn simple_ins(name: &'static str) -> Ins {
         "VSET" => "op_vset",
         "ADDTO" => "op_addto",
         "FADDTO" => "op_faddto",
-        "FCOUNT" => "op_fcount",
+        "FINC" => "op_finc",
         "INCR" => "op_count",
         "FMATCH" => "op_fmatch",
         "BFS" => "op_bfs",

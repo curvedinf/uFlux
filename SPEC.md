@@ -406,7 +406,7 @@ No file-handle object type; every op is self-contained.
 | 184 | 🌯 | `wfind` | start fn_addr pred_addr → v_or_0 | BFS with early exit: first match or 0 |
 | 187 | 🤸 | `addto` | dict key amount → | dict[key] += amount; missing starts at 0 |
 | 188 | 🌰 | `faddto` | dict field_idx amount → | dict[field] += amount; no Str alloc |
-| 189 | 😪 | `fcount` | path → count | count lines in file |
+| 189 | 😪 | `finc` | dict field_idx → | dict[field] += 1; no Str alloc |
 
 ### JSON
 

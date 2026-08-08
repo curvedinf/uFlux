@@ -27,7 +27,7 @@ MNEMONICS = [
     "now","time","timef","bloom","badd","btest","slurp","spit","argv",
     "group","agg","unique","flat","chunk","vargsort","vsearchsorted","vwhere",
     "mmap","feach","ffold","fsplit","fget","fatoi","fatof","fsget","fbyte",
-    "vget","vset","addto","faddto","fcount","fmatch","bfs","dfs","wfind",
+    "vget","vset","addto","faddto","finc","fmatch","bfs","dfs","wfind",
     "json","unjson","iter","next","collect","imap","ifilter","femit",
     "try","retry","spawn","atoi","atof","itoa","ftoa","entry",
 ]
