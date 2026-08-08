@@ -38,6 +38,50 @@ pub fn method_typekey(name: &str, structs: &StructMap) -> Option<i64> {
 pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
     let mut macros: HashMap<String, Vec<Tok>> = HashMap::new();
     let imports: Vec<Import> = Vec::new();
+    // v12: destructuring bind helpers
+    fn is_multi_return(ins: Option<&Ins>) -> bool {
+        matches!(ins, Some(Ins::Simple(name)) if matches!(*name,
+            "op_sh" | "op_try" | "op_retry" | "op_match" | "op_scan" | "op_next"))
+    }
+    fn is_bind(t: &Tok) -> bool {
+        matches!(t, Tok::LocalSet(_) | Tok::SetV(_) | Tok::Discard)
+    }
+    #[derive(Clone)]
+    enum Bind { Local(String), Global(String), Discard }
+    fn collect_destructure(first: Bind, q: &mut VecDeque<Tok>) -> Vec<Bind> {
+        let mut pattern = vec![first];
+        while let Some(t2) = q.front() {
+            if !is_bind(t2) { break; }
+            match q.pop_front().unwrap() {
+                Tok::LocalSet(name) => pattern.push(Bind::Local(name)),
+                Tok::SetV(name) => pattern.push(Bind::Global(name)),
+                Tok::Discard => pattern.push(Bind::Discard),
+                _ => break,
+            }
+        }
+        pattern
+    }
+    fn emit_destructure(pattern: Vec<Bind>, p: &mut Parsed, dtemp_ctr: &mut usize) {
+        let temp = format!("ufdt{}", *dtemp_ctr);
+        *dtemp_ctr += 1;
+        p.ins.push(Ins::LocalSet(temp.clone()));
+        for (i, bind) in pattern.iter().enumerate() {
+            p.ins.push(Ins::LocalGet(temp.clone()));
+            p.ins.push(Ins::PushI(i as i64));
+            p.ins.push(Ins::Simple("op_getq"));
+            match bind {
+                Bind::Local(name) => p.ins.push(Ins::LocalSet(name.clone())),
+                Bind::Global(name) => {
+                    if !p.vars.contains(name) {
+                        p.vars.push(name.clone());
+                    }
+                    p.ins.push(Ins::SetV(name.clone()));
+                }
+                Bind::Discard => {}
+            }
+        }
+    }
+    let mut dtemp_ctr = 0usize;
     let mut p = Parsed {
         ins: Vec::new(),
         labels: HashMap::new(),
@@ -72,7 +116,15 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
             Tok::Op("BREAK") => p.ins.push(Ins::Break),
             Tok::Op("CONT") => p.ins.push(Ins::Cont),
             Tok::Op(name) if name.starts_with('~') => {
-                panic!("opcode index {} is retired in v10", name)
+                let retired_name = match name {
+                    "~1" => "dup",
+                    "~2" => "ovr",
+                    "~3" => "drop",
+                    "~4" => "swp",
+                    "~5" => "pick",
+                    _ => name,
+                };
+                panic!("'{}' is retired in v12 — use named variables instead", retired_name)
             }
             Tok::Op(name) => p.ins.push(simple_ins(name)),
             Tok::PushI(v) => p.ins.push(Ins::PushI(v)),
@@ -97,10 +149,16 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
                 _ => unreachable!(),
             },
             Tok::SetV(n) => {
-                if !p.vars.contains(&n) {
-                    p.vars.push(n.clone());
+                if is_multi_return(p.ins.last()) {
+                    // v12 destructuring bind: ^name! after a multi-return op
+                    let pattern = collect_destructure(Bind::Global(n), &mut q);
+                    emit_destructure(pattern, &mut p, &mut dtemp_ctr);
+                } else {
+                    if !p.vars.contains(&n) {
+                        p.vars.push(n.clone());
+                    }
+                    p.ins.push(Ins::SetV(n));
                 }
-                p.ins.push(Ins::SetV(n));
             }
             Tok::GetV(n) => {
                 if !p.vars.contains(&n) {
@@ -109,10 +167,25 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
                 p.ins.push(Ins::GetV(n));
             }
             Tok::LocalSet(n) => {
-                p.ins.push(Ins::LocalSet(n));
+                if is_multi_return(p.ins.last()) {
+                    // v12 destructuring bind: name! after a multi-return op
+                    let pattern = collect_destructure(Bind::Local(n), &mut q);
+                    emit_destructure(pattern, &mut p, &mut dtemp_ctr);
+                } else {
+                    p.ins.push(Ins::LocalSet(n));
+                }
             }
             Tok::LocalGet(n) => {
                 p.ins.push(Ins::LocalGet(n));
+            }
+            Tok::Discard => {
+                if is_multi_return(p.ins.last()) {
+                    // v12 destructuring bind: leading _! after a multi-return op
+                    let pattern = collect_destructure(Bind::Discard, &mut q);
+                    emit_destructure(pattern, &mut p, &mut dtemp_ctr);
+                } else {
+                    panic!("_! is only valid inside a destructuring bind");
+                }
             }
             Tok::IncLocal(n) => {
                 p.ins.push(Ins::PushI(1));
@@ -710,11 +783,6 @@ pub fn merge_tus(tus: Vec<Parsed>, mods: Vec<String>, init_flags: &[bool]) -> Pa
 pub fn simple_ins(name: &'static str) -> Ins {
     // helper name in the C prelude
     let helper: &'static str = match name {
-        "DUP" => "op_dup",
-        "OVR" => "op_ovr",
-        "DRP" => "op_drp",
-        "SWP" => "op_swp",
-        "PICK" => "op_pick",
         "ADD" => "op_add",
         "SUB" => "op_sub",
         "MUL" => "op_mul",
@@ -777,6 +845,8 @@ pub fn simple_ins(name: &'static str) -> Ins {
         "DIV" => "op_div",
         "REM" => "op_rem",
         "EQ" => "op_eq",
+        "SEQ" => "op_seq",
+        "SNE" => "op_sne",
         "LT" => "op_lt",
         "GT" => "op_gt",
         "NOT" => "op_not",

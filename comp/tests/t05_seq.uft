@@ -1,26 +1,26 @@
 ; range/sort/filter/some/every
-0 5 range len "%d\n" print drop
-0 5 range 3 get "%d\n" print drop
-list 3 push 1 push 2 push sort 0 get "%d\n" print drop
-0 10 range 'even filter len "%d\n" print drop
-0 10 range 'big some "%d\n" print drop
-0 10 range 'big every "%d\n" print drop
+0 5 range len print
+0 5 range 3 get print
+list 3 push 1 push 2 push sort 0 get print
+0 10 range 'even filter len print
+0 10 range 'big some print
+0 10 range 'big every print
 ; orelse
-0 42 orelse "%d\n" print drop
-7 42 orelse "%d\n" print drop
+0 42 orelse print
+7 42 orelse print
 ; group/agg/unique/flat/chunk
 0 10 range 'pmod group g!
-g@ 0 get len "%d\n" print drop
+g@ 0 get len print
 g@ 'gsum agg a!
-a@ 1 get "%d\n" print drop
-list 1 push 2 push 2 push 3 push 1 push unique len "%d\n" print drop
-list list 1 push 2 push push list 3 push push 4 push flat len "%d\n" print drop
-0 7 range 3 chunk len "%d\n" print drop
-0 7 range 3 chunk 2 get len "%d\n" print drop
+a@ 1 get print
+list 1 push 2 push 2 push 3 push 1 push unique len print
+list list 1 push 2 push push list 3 push push 4 push flat len print
+0 7 range 3 chunk len print
+0 7 range 3 chunk 2 get len print
 ret
 ; --- quotation bodies ---
 even: 2 rem 0 eq ret
 big: 5 gt ret
 pmod: 3 rem ret
 gsum: lst! lst@ len n! n@ _arr int a! n@ 'cp for a@ vsum ret
-cp: k! lst@ k@ get a@ swp k@ swp set ret
+cp: k! lst@ k@ get v! a@ k@ v@ set ret

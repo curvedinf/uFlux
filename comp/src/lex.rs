@@ -9,8 +9,8 @@ pub const TYPE_BASE: u32 = 0x13110;
 
 // Opcode glyphs (187 live ops). Index = OP_NAMES array position.
 // All colored emoji (U+1F300+), each exactly one Qwen3 token.
-pub const OP_GLYPHS: [u32; 212] = [
-    0x1F300, 0x1F600, 0x1F680, 0x1F90D, 0x1F301, 0x1F601, 0x1F682, 0x1F910,
+pub const OP_GLYPHS: [u32; 214] = [
+    0x1F300, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1F682, 0x1F910,
     0x1F302, 0x1F602, 0x1F683, 0x1F911, 0x1F303, 0x0, 0x0, 0x0,
     0x1F603, 0x1F684, 0x1F912, 0x1F304, 0x1F604, 0x1F685, 0x0, 0x1F913,
     0x0, 0x0, 0x1F305, 0x1F605, 0x1F686, 0x1F914, 0x0, 0x0,
@@ -37,7 +37,7 @@ pub const OP_GLYPHS: [u32; 212] = [
     0x1F331, 0x1F62B, 0x1F6CB, 0x1F93D, 0x1F332, 0x1F62C, 0x1F6CC, 0x1F93E,
     0x1F333, 0x1F62D, 0x1F6CD, 0x1F940, 0x1F334, 0x1F62E, 0x1F6CE,
     0x1F95B, 0x1F95C, 0x1F95D, 0x1F95E,
-    0x1F958,
+    0x1F958, 0x1F959, 0x1F95A,
 ];
 
 // v-space: base-64 digits for variable/label name atoms (colored emoji).
@@ -114,8 +114,8 @@ pub fn glyph_type_id(c: char) -> Option<i64> {
 // 196 opcode slots (0..=195). Retired indices use "~NN" placeholders: they
 // have no glyph, no text mnemonic, and no runtime helper — any use is a
 // compile error (unassigned glyph / unknown identifier).
-pub const OP_NAMES: [&str; 212] = [
-    "LIT", "DUP", "OVR", "DRP", "SWP", "PICK", "ADD", "SUB", "MUL", "AND", "SHR", "INC", "DEC",
+pub const OP_NAMES: [&str; 214] = [
+    "LIT", "~1", "~2", "~3", "~4", "~5", "ADD", "SUB", "MUL", "AND", "SHR", "INC", "DEC",
     "~13", "~14", "~15", "FOR", "CALL", "RET", "OBJ", "GET", "SET", "~22", "ARR", "~24", "~25",
     "CLONE", "CAST", "MACRO", "TENSOR", "~30", "~31", "~32", "SETV", "GETV", "STR", "CAT", "FMT",
     "BUF", "~39", "BUFCOPY", "ADDR", "LOADX", "STOREX", "SIZEOF", "OFFSET", "STRUCT", "MALLOC",
@@ -153,6 +153,7 @@ pub const OP_NAMES: [&str; 212] = [
     "ENTRY",
     "HASARGS", "ARGI", "SORTKEYS", "TOPN",
     "RANGEFOLD",
+    "SEQ", "SNE",
 ];
 
 pub fn op_index(name: &str) -> Option<usize> {
@@ -163,11 +164,7 @@ pub fn op_index(name: &str) -> Option<usize> {
 pub fn op_usage(name: &str) -> &'static str {
     match name {
         "LIT" => "→ v | immediate follows",
-        "DUP" => "a → a a",
-        "OVR" => "a b → a b a",
-        "DRP" => "a →",
-        "SWP" => "a b → b a",
-        "PICK" => "… n → elem | copy nth-from-top",
+        "~1" | "~2" | "~3" | "~4" | "~5" => "retired in v12",
         "ADD" => "a b → a+b",
         "SUB" => "a b → a-b",
         "MUL" => "a b → a*b",
@@ -353,6 +350,8 @@ pub fn op_usage(name: &str) -> &'static str {
         "ARGI" => "idx → int | argv[idx] parsed as int",
         "SORTKEYS" => "dict → key_list | keys + sort fused",
         "TOPN" => "dict n → list | top-n [key value] pairs",
+        "SEQ" => "a b → 0/1 | strict equality (===)",
+        "SNE" => "a b → 0/1 | strict inequality (!==)",
         _ => "",
     }
 }
@@ -743,6 +742,12 @@ impl Lexer {
                 if is_bad_ident(&name) {
                     self.err(&format!("identifier '{}' — identifiers may not start with '_'", name));
                 }
+                if name == "_" && (self.peek() == Some('!') || self.peek().map_or(false, |c| opcode_index(c) == Some(33))) {
+                    self.pos += 1;
+                    out.push(Tok::Discard);
+                    self.pushed = false;
+                    continue;
+                }
                 if self.peek() == Some(':') {
                     self.pos += 1;
                     out.push(Tok::LabelDef(name));
@@ -784,7 +789,7 @@ impl Lexer {
         // count as "pushed a value"; purely consuming/structural ops do not
         self.pushed = matches!(
             name,
-            "LIT" | "STR" | "DUP" | "OVR" | "PICK" | "ADD" | "SUB" | "MUL" | "AND" | "SHR"
+            "LIT" | "STR" | "ADD" | "SUB" | "MUL" | "AND" | "SHR"
                 | "INC" | "DEC" | "GET" | "GETQ" | "HAS" | "CLONE" | "CAST" | "ARR" | "TENSOR" | "OBJ"
                 | "CAT" | "FMT" | "BUF" | "MALLOC" | "LOADX" | "SIZEOF" | "OFFSET" | "PRINT"
                 | "SCAN" | "CALL" | "SYS" | "DICT" | "KEYS" | "LIST"
@@ -1087,18 +1092,14 @@ impl Lexer {
             }
             "OBJ" | "CAST" | "ARR" | "TENSOR" => {
                 self.skip_ws();
-                // ARR/TENSOR take [ty, len] with len on top; a type immediate
-                // follows the length in source, so it lands above len and must
-                // be swapped underneath before the op runs.
-                let needs_swp = name == "ARR" || name == "TENSOR";
+                // v12: ARR/TENSOR take [len, type] with type on top. The type
+                // immediate follows the op in source, so it lands on top of len
+                // with no swap needed.
                 if let Some(c) = self.peek() {
                     if let Some(id) = glyph_type_id(c) {
                         // type-glyph immediate: push the id, then the op
                         self.pos += 1;
                         out.push(Tok::PushI(id));
-                        if needs_swp {
-                            out.push(Tok::Op("SWP"));
-                        }
                         out.push(Tok::Op(OP_NAMES[idx]));
                         return;
                     }
@@ -1109,9 +1110,6 @@ impl Lexer {
                         }
                         if let Some(id) = type_id(&kw) {
                             out.push(Tok::PushI(id));
-                            if needs_swp {
-                                out.push(Tok::Op("SWP"));
-                            }
                         } else if name == "OBJ" {
                             // struct name: resolved at parse time via @objsize
                             out.push(Tok::Ident(format!("@objsize:{}", kw)));
@@ -1158,8 +1156,8 @@ impl Lexer {
 // Retired slots return "~NN" which never matches a source token.
 pub fn text_mnemonic(idx: usize) -> &'static str {
     match OP_NAMES[idx] {
-        "LIT" => "_lit", "DUP" => "dup", "OVR" => "ovr", "DRP" => "drop", "SWP" => "swp",
-        "PICK" => "pick", "ADD" => "add", "SUB" => "sub", "MUL" => "mul", "AND" => "and",
+        "LIT" => "_lit", "~1" | "~2" | "~3" | "~4" | "~5" => "~retired",
+        "ADD" => "add", "SUB" => "sub", "MUL" => "mul", "AND" => "and",
         "SHR" => "shr", "INC" => "inc", "DEC" => "dec",
         "FOR" => "for", "CALL" => "_call", "RET" => "ret", "OBJ" => "_obj",
         "GET" => "get", "SET" => "set", "ARR" => "_arr", "CLONE" => "clone", "CAST" => "_cast",
@@ -1214,6 +1212,7 @@ pub fn text_mnemonic(idx: usize) -> &'static str {
         "ENTRY" => "entry",
         "HASARGS" => "hasargs", "ARGI" => "argi", "SORTKEYS" => "sortkeys", "TOPN" => "topn",
         "RANGEFOLD" => "rangefold",
+        "SEQ" => "seq", "SNE" => "sne",
         other => other, // "~NN" retired placeholders: never a valid source token
     }
 }
@@ -1425,6 +1424,11 @@ impl TextLexer {
             if let Some(name) = tok.strip_suffix('!') {
                 if !name.is_empty() && !tok.starts_with('!') {
                     self.pos += 1;
+                    // v12: _! is the destructuring discard token
+                    if name == "_" {
+                        out.push(Tok::Discard);
+                        continue;
+                    }
                     // v11: ^x! = global, x! = local
                     if let Some(gname) = name.strip_prefix('^') {
                         if gname.is_empty() {
@@ -1650,14 +1654,11 @@ impl TextLexer {
                         "_arr" => "ARR",
                         _ => "TENSOR",
                     };
-                    let needs_swp = name == "ARR" || name == "TENSOR";
+                    // v12: ARR/TENSOR take [len, type]; type immediate lands on top
                     match self.peek() {
                         Some(t) if type_id(t).is_some() => {
                             let id = type_id(self.next().unwrap().as_str()).unwrap();
                             out.push(Tok::PushI(id));
-                            if needs_swp {
-                                out.push(Tok::Op("SWP"));
-                            }
                             out.push(Tok::Op(name));
                         }
                         Some(t) if !is_reserved(t) && !is_bad_ident(t) && !t.ends_with(':') && !t.ends_with('!') && !t.ends_with('@') && parse_text_num(t).is_none() && unquote(t).is_none() && !t.starts_with('\'') => {

@@ -1,0 +1,2 @@
+pub dbl:
+  2 mul ret

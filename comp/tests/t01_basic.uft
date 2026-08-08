@@ -1,13 +1,14 @@
-10 3 div "%d\n" print
-10 3 rem "%d\n" print
-10 3 eq "%d\n" print
-2 3 lt "%d\n" print
-5 6 gt "%d\n" print
-0 not "%d\n" print
-5 3 or "%d\n" print
-5 3 xor "%d\n" print
-1 4 shl "%d\n" print
-5 bnot "%d\n" print
-2.5 2.0 div "%f\n" print
-1 2 swp "%d %d\n" print
-list 1 push 2 push 3 push len "%d\n" print
+10 3 div print
+10 3 rem print
+10 3 eq print
+2 3 lt print
+5 6 gt print
+0 not print
+5 3 or print
+5 3 xor print
+1 4 shl print
+5 bnot print
+2.5 2.0 div print
+1 print
+2 print
+list 1 push 2 push 3 push len print

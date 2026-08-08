@@ -1,21 +1,53 @@
-# µFlux Specification v11
+# µFlux Specification v12
 
 Normative for `comp/` (the `uf` compiler). The `trans/` transpiler targets the
 text encoding (see final section).
 
-**v11 is not backward compatible with v10**: `x!`/`x@` are now call-local
-variables. Globals use `^x!`/`^x@`. The project is undeployed/developmental.
+**v12 is not backward compatible with v11**. See the v12 changelog section below
+for the full list of breaking changes. The project is undeployed/developmental.
 
-µFlux is a stack-based language compiled to C then native via `cc`, designed
-for LLM-authored one-off scripts (low token count, fast, reliable). Every value
-sits on a shared data stack; every opcode consumes from the top and pushes
-results back. Programs are postfix (execution order), no expression syntax.
+µFlux is a language based on a **managed hidden stack**, compiled to C then native
+via `cc`, designed for LLM-authored one-off scripts (low token count, fast,
+reliable). Values flow through named local/global variables, literal constants,
+and the return value of the immediately preceding op. The data stack still exists
+as the runtime execution substrate, but it is managed by the compiler and runtime;
+the programmer never sees or manipulates it directly. Programs are postfix
+(execution order), no expression syntax.
 
 Design pillars: small orthogonal opcode set; uniform container protocol by tag
 dispatch; algorithmic efficiency by default (typed arrays, autovectorized C
 loops, open-addressing hashes, Timsort, streaming channels); structured control
 flow; self-contained scripts (file I/O, argv, shell-out, regex, JSON in core);
 garbage-collected (scripts never `free` managed objects).
+
+## v12 changelog
+
+The following changes are effective as of v12:
+
+1. **Managed hidden stack.** The language is no longer described as "stack-based"
+   at the user level. The data stack is an implementation detail; programmers work
+   with named variables and op results.
+
+2. **Retired stack-manipulation opcodes.** `dup`, `ovr`, `drop`, `swp`, and `pick`
+   are removed. Their opcode indices are retired and never reused.
+
+3. **Pass-through assignment.** `x!` and `^x!` store a value and leave it on the
+   hidden stack for the next op. Container `set` similarly returns the stored value.
+
+4. **Auto-discard.** Unbound values on the hidden stack are silently discarded at
+   natural boundaries (end of statement line, before `ret`, end of task body, etc.).
+
+5. **Multi-return ops produce a single tuple/list.** `sh`, `try`, `match`, `next`,
+   `scan`, etc. return one list value. Destructuring bind (`op a! b! c!`) extracts
+   slots positionally; `_!` discards a slot. Excess binds receive `null`; unbound
+   trailing slots are auto-discarded.
+
+6. **Universal coercion.** Ops coerce inputs based on context; incompatible values
+   become `NaN` (numeric context) or `"NaN"` (string context) and propagate rather
+   than aborting. See the Coercion section below.
+
+7. **Smart `print`.** `print` consumes the top-of-stack value and prints a
+   type-aware, recursive representation. Formatted output moves to `printf`.
 
 ## Source encodings
 
@@ -78,7 +110,7 @@ it begins an ASCII identifier.
 `-` is a **sign** iff the previous token did NOT push a value; otherwise SUB.
 
 Value-pushing tokens: number, string, GETV (`@`), type-id push, ADDR (`'`),
-and value-leaving opcodes (DUP OVR PICK ADD SUB MUL AND SHR INC DEC GET CLONE
+and value-leaving opcodes (ADD SUB MUL AND SHR INC DEC GET CLONE
 CAST ARR TENSOR OBJ CAT FMT BUF MALLOC LOADX SIZEOF OFFSET PRINT SCAN CALL SYS
 and all result-producing v10+ ops).
 
@@ -93,11 +125,13 @@ This rule is dense-only: in text mode `-` alone is SUB and `-5` is a number
 A run of v-space atoms folds into one name. Whitespace must separate two
 adjacent v-runs meant to be distinct.
 
-v11 variable semantics:
-- `<name>!` — pop into **local** variable (call-scoped, fresh frame per CALL).
+v12 variable semantics:
+- `<name>!` — store into **local** variable (call-scoped, fresh frame per CALL)
+  and leave the value on the hidden stack for chaining.
 - `<name>@` — push **local** variable.
-- `^<name>!` / `^<name>@` — pop/push **global** variable (static, persists
-  across calls, shared across threads/TUs).
+- `^<name>!` / `^<name>@` — store/fetch **global** variable (static, persists
+  across calls, shared across threads/TUs). `^<name>!` also leaves the value on
+  the hidden stack.
 - A v-run after CALL/ADDR/`'` is a label **reference**.
 - Any other bare v-run is a label **definition** (no colon needed).
 - ASCII `name:` still defines a label; ASCII names work as jump targets.
@@ -153,7 +187,7 @@ Six ops cover all element access, dispatched on the handle's tag:
 
 ## Opcode reference
 
-207 slots (0..206); 20 retired (indices 13–15, 22, 24–25, 30–32, 39, 57–61,
+214 slots (0..213); 25 retired (indices 1–5, 13–15, 22, 24–25, 30–32, 39, 57–61,
 76–77, 86–87, 151). Retired indices never reuse. Each live opcode has a unique
 dense glyph; the text mnemonic is the lowercased name. Glyph assignments are
 1:1 and final in `comp/src/lex.rs`.
@@ -163,11 +197,11 @@ dense glyph; the text mnemonic is the lowercased name. Glyph assignments are
 | idx | | mn | stack | notes |
 |----|---|----|----|-------|
 | 0 | 🌀 | `_lit` | → v | immediate follows (number/type glyph/keyword) |
-| 1 | 😀 | `dup` | a → a a | |
-| 2 | 🚀 | `ovr` | a b → a b a | |
-| 3 | 🤍 | `drop` | a → | |
-| 4 | 🌁 | `swp` | a b → b a | |
-| 5 | 😁 | `pick` | … n → elem | copy nth-from-top (0-indexed) |
+| 1 | 😀 | `dup` | — | **retired in v12** |
+| 2 | 🚀 | `ovr` | — | **retired in v12** |
+| 3 | 🤍 | `drop` | — | **retired in v12** |
+| 4 | 🌁 | `swp` | — | **retired in v12** |
+| 5 | 😁 | `pick` | — | **retired in v12** |
 | 6 | 🚂 | `add` | a b → a+b | `+` |
 | 7 | 🤐 | `sub` | a b → a−b | `-` (dense: lookback rule) |
 | 8 | 🌂 | `mul` | a b → a*b | `*` |
@@ -180,14 +214,14 @@ dense glyph; the text mnemonic is the lowercased name. Glyph assignments are
 | 18 | 🤒 | `ret` | → | |
 | 19 | 🌄 | `_obj` | → h | type immediate (struct id) |
 | 20 | 😄 | `get` | h k → v | polymorphic (protocol above) |
-| 21 | 🚅 | `set` | h k v → | polymorphic |
+| 21 | 🚅 | `set` | h k v → v | polymorphic; returns stored value in v12 |
 | 23 | 🤓 | `_arr` | len → h | type immediate; 64-aligned typed array |
 | 26 | 🌅 | `clone` | h → h' | deep copy |
 | 27 | 😅 | `_cast` | h type → h | checked downcast (struct id); dies on mismatch |
 | 28 | 🚆 | `macro` | (directive) | `macro name { body }` |
 | 29 | 🤔 | `_tensor` | len → h | type immediate |
-| 33 | 🌆 | `setv` | value → | `<v>!` local, `^<v>!` global (v11) |
-| 34 | 😆 | `getv` | → value | `<v>@` local, `^<v>@` global (v11) |
+| 33 | 🌆 | `setv` | value → value | `<v>!` local, `^<v>!` global (v12 pass-through) |
+| 34 | 😆 | `getv` | → value | `<v>@` local, `^<v>@` global (v12) |
 | 35 | 🚇 | `_str` | → h | bare `"…"` preferred |
 | 36 | 🤕 | `cat` | a b → h | tag-dispatched: str/arr/list concat |
 | 37 | 🌇 | `fmt` | args… fmt → h | |
@@ -206,8 +240,8 @@ dense glyph; the text mnemonic is the lowercased name. Glyph assignments are
 | 51 | 😊 | `import` | (directive) | `import c"fn"(types)->ret` |
 | 52 | 🚍 | `export` | (directive) | `export "name"` before a label |
 | 53 | 🤙 | `extern` | → address | `extern "symbol"` — global C symbol via `__asm__` |
-| 54 | 🌋 | `print` | args… fmt → n | fmt on top; one arg per `%` conversion |
-| 55 | 😋 | `scan` | fmt → values… count | fscanf semantics; any error aborts |
+| 54 | 🌋 | `print` | v → | type-aware recursive representation; top-level strings print raw |
+| 55 | 😋 | `scan` | fmt → list | fscanf semantics; list holds values followed by count |
 | 206 | 🛎 | `entry` | → | marks program entry; implicit jump from pc 0 |
 
 ### Containers
@@ -243,7 +277,9 @@ int ops die on float/pointer operands (use CAST or `uf_f`-aware ops).
 |----|---|----|----|-------|
 | 104 | 😕 | `div` | a b → a/b | int truncates toward zero; float f64. b=0: dies |
 | 105 | 🚚 | `rem` | a b → a%b | C remainder (sign follows dividend). b=0: dies |
-| 106 | 🤤 | `eq` | a b → 0/1 | ints by value; floats by bit pattern; strings by content; mixed int/float numeric |
+| 106 | 🤤 | `eq` | a b → 0/1 | loose equality (==); coerces per universal coercion rules |
+| 212 | 🥡 | `seq` | a b → 0/1 | strict equality (===); types and values must match |
+| 213 | 🥢 | `sne` | a b → 0/1 | strict inequality (!==) |
 | 107 | 🌙 | `lt` | a b → 0/1 | numeric or string lexicographic |
 | 108 | 😖 | `gt` | a b → 0/1 | as lt |
 | 109 | 🚛 | `not` | a → 0/1 | 1 if a==0 |
@@ -354,7 +390,7 @@ Calendar arithmetic, durations, truncation, time-series joins are library code
 
 | idx | | mn | stack | notes |
 |----|---|----|----|-------|
-| 85 | 🌑 | `sh` | cmd → out err status | `/bin/sh -c`; -1 spawn failure, 128+signal |
+| 85 | 🌑 | `sh` | cmd → list | returns `[out, err, status]`; -1 spawn failure, 128+signal |
 | 88 | 😑 | `shp` | cmd → chan | detached thread feeds stdout line-by-line (cap 64) |
 | 89 | 🚖 | `exec` | list → status | no shell; list is argv (elem 0 = program) |
 
@@ -370,7 +406,7 @@ capture groups (max 9, group 0 = whole match). Malformed pattern = runtime die.
 
 | idx | | mn | stack | notes |
 |----|---|----|----|-------|
-| 90 | 🤠 | `match` | str pat → list found | first match; group strings 0..n; found 0/1 on top |
+| 90 | 🤠 | `match` | str pat → list | returns `[groups, found]`; first match; group strings 0..n |
 | 91 | 🌓 | `replace` | str pat repl → str' | replace ALL; `\1`..`\9` backrefs |
 | 92 | 😒 | `rsplit` | str pat → list | pieces between matches; empty matches skipped |
 | 93 | 🚗 | `glob` | str pat → 0/1 | fnmatch-style |
@@ -422,7 +458,7 @@ Single-use, mutable cursors. Every collection is iterable.
 | idx | | mn | stack | notes |
 |----|---|----|----|-------|
 | 192 | 🌱 | `iter` | h → it | list/arr/tensor (elems), dict (keys), str (bytes), chan (until close), bitmap (set-bit indices) |
-| 193 | 😫 | `next` | it → v more | exhausted → `0 0`; non-iter: dies |
+| 193 | 😫 | `next` | it → list | returns `[value, more]`; exhausted → `[0, 0]`; non-iter: dies |
 | 194 | 🛋 | `collect` | it → list | drain into fresh list |
 | 195 | 🤽 | `imap` | it fn_addr → it' | lazy map; fn (v → v') |
 | 196 | 🌲 | `ifilter` | it pred_addr → it' | lazy filter; pred (v → 0/1) |
@@ -432,8 +468,8 @@ Single-use, mutable cursors. Every collection is iterable.
 
 | idx | | mn | stack | notes |
 |----|---|----|----|-------|
-| 198 | 🛌 | `try` | body_addr → result ok | CALL under die containment; success → value + 1, die → `0 0` |
-| 199 | 🤾 | `retry` | n body_addr → result ok | try up to n+1 times |
+| 198 | 🛌 | `try` | body_addr → list | returns `[result, ok]`; success → `[value, 1]`, die → `[0, 0]` |
+| 199 | 🤾 | `retry` | n body_addr → list | same as `try`; try up to n+1 times |
 | 200 | 🌳 | `spawn` | body_addr → chan | detached thread; TOS enqueued + chan closed at body end; `deq` = join |
 
 `die` unwinds to the nearest `setjmp` checkpoint pushed by `try`/`retry` (they
@@ -598,12 +634,84 @@ Lowercase ASCII mnemonics, whitespace-delimited. Same Tok AST as dense.
 
 ## PRINT and SCAN
 
-- **PRINT** (54): `args… fmt → n`. Format string on top (deepest arg first —
-  reverse of C's printf convention). Pops fmt, pops one arg per `%` conversion,
-  pushes printf return value. `%%` prints `%`.
-- **SCAN** (55): `fmt → values… count`. Each conversion reads stdin via fscanf:
-  `%d/%i/%u/%x/%o` → i64, `%f/%e/%g` → f64, `%s` → fresh string handle. Values
-  pushed in conversion order, then count. Input error aborts.
+- **PRINT** (54): `v →`. In v12, `print` consumes the top-of-stack value and
+  emits a type-aware, recursive representation. Top-level strings are printed
+  raw (no quotes); nested strings and non-string values are rendered with
+  unambiguous formatting. For formatted output, build a string with `fmt` and
+  then `print` it.
+- **SCAN** (55): `fmt → list`. Each conversion reads stdin via fscanf:
+  `%d/%i/%u/%x/%o` → i64, `%f/%e/%g` → f64, `%s` → fresh string handle. The
+  returned list holds the converted values followed by the count. Input error
+  aborts. Destructure with `list N get` or a bind list.
+
+## Universal coercion
+
+v12 replaces strict per-op type checking with uniform coercion based on the
+context in which a value is used. The rules are the same for every op; there are
+no per-op exceptions.
+
+### Numeric context
+
+`add`, `sub`, `mul`, `div`, `rem`, comparisons, and vector ops coerce operands
+to numbers:
+
+| Input | Result |
+|-------|--------|
+| int `42` | `42` |
+| float `3.14` | `3.14` |
+| str `"42"` | `42` |
+| str `"0x1A"` | `26` |
+| str `""` / whitespace | `0` |
+| str `"hello"` | `NaN` |
+| null / `0` handle | `0` |
+| bool | `1` or `0` |
+| list `[x]` | unwrap single element, then coerce |
+| list `[]` | `0` |
+| list `[x y …]` / dict / obj | `NaN` |
+
+`NaN` propagates through arithmetic. Ops that must produce an integer truncate
+`NaN` at the point of use, which is a die.
+
+### String context
+
+`cat`, `join`, `split`, `fmt`, and string ops coerce operands to strings:
+
+| Input | Result |
+|-------|--------|
+| int | decimal string |
+| float | decimal string or `"NaN"` |
+| null / `0` handle | `"null"` |
+| bool | `"true"` / `"false"` |
+| list | `"1,2,3"` style join |
+| list `[]` | `""` |
+| dict / obj | `"[object Object]"` |
+
+### Truthiness
+
+`if`, `ifelse`, `while`, `filter`, `some`, `every`, and bitmap ops use JS-style
+truthiness. Falsy values: `0`, `""`, `null`, `NaN`, and empty collections.
+Everything else is truthy (`1`).
+
+### Equality
+
+- `eq` uses loose equality (`==`): `"3" eq 3` → `1`, `null eq 0` → `1`.
+- `seq` uses strict equality (`===`): types and values must match.
+- `sne` is strict inequality.
+- `lt`/`gt` coerce both sides to Number for comparison.
+
+### Collection coercion
+
+Vector ops expecting `arr` coerce lists, dict values, strings (char codes),
+bitmaps (set-bit indices), and scalars (single-element array). Bitmap ops coerce
+collection elements to bits via truthiness.
+
+### When coercion dies
+
+Only when the result is genuinely undefined, never on input type:
+
+- Integer truncation of `NaN` or `Infinity` (`div`, `rem`).
+- `vmean` / `vmin` / `vmax` on empty collection.
+- Length mismatch in elementwise ops (`veadd`, etc.).
 
 ## Concrete grammar
 
@@ -616,12 +724,13 @@ token        := number | string | varset | varget | labeldef | jump | op | direc
 number       := ['-'] lrun ['.' lrun] ['e' ['-'] lrun]
 string       := '"' ... '"'
 name         := [a-zA-Z][a-zA-Z0-9_]*    ; must NOT start with '_' (reserved for _-prefixed ops)
-varset       := ['^'] name ('!' | setv-glyph)
+varset       := ['^'] name ('!' | setv-glyph)   ; v12: store and pass through
 varget       := ['^'] name ('@' | getv-glyph)
 labeldef     := name (':')?
 jump         := (_call | "'") name
 op           := opcode-glyph | '+' | '-' | '*' | '&'
              ; text mode: immediate-operand ops are _-prefixed — see section below
+             ; v12: dup, ovr, drop, swp, pick are retired
 directive    := import c"name"(params)->ret | export "name" | extern "sym"
              | macro name { token* } | struct name { field:type, … }
              | use "name" | mod "name" | pub <labeldef>
@@ -629,10 +738,15 @@ directive    := import c"name"(params)->ret | export "name" | extern "sym"
 taskblock    := <input>* [<count>] task <name> token* endt
 ```
 
+A sequence of consecutive `varset` tokens after a multi-return op is a
+**destructuring bind**: each `name!` binds the next slot of the returned tuple,
+and `_!` discards a slot. Bind arity need not match tuple length; excess binds
+receive `null` and unbound trailing slots are auto-discarded.
+
 Quotation-taking ops (if/ifelse/while/for, try/retry, filter/some/every,
 vmap/vfold, imap/ifilter, feach/ffold, bfs/dfs/wfind, spawn, group/agg, fanout
-bodies) take label addresses on the stack — written `'<label>` — resolved by
-the compiler. `break`/`cont` valid only inside a lexically enclosing
+bodies) take label addresses on the hidden stack — written `'<label>` — resolved
+by the compiler. `break`/`cont` valid only inside a lexically enclosing
 `while`/`for` body in the same function (compile error otherwise).
 
 ## Immediate-operand opcodes (_-prefixed, text mode only)
@@ -646,8 +760,8 @@ compiler.
 All other opcodes operate purely on the runtime stack.
 
 This makes the distinction visible at a glance: `_call foo` consumes the
-token `foo` as a label reference, whereas `+`, `dup`, `swap` read their
-inputs from the stack at run time.
+token `foo` as a label reference, whereas `+` reads its inputs from the
+hidden stack at run time.
 
 User-defined identifiers (variables, labels) may **not** start with `_` —
 the prefix is reserved for these opcodes.
@@ -705,7 +819,7 @@ Linking: always `-lpthread -lm` plus `-l<name>` per USE.
 
 ## Totals
 
-207 opcode slots (0..206); 20 retired indices (never reused); **187 live
+214 opcode slots (0..213); 25 retired indices (never reused); **184 live
 opcodes**. Every live opcode has a unique dense glyph codepoint.
 
 ## Non-goals

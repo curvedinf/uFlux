@@ -33,11 +33,15 @@ v12 changes the framing: µFlux is based on a managed hidden stack. The stack is
 
 4. **Multi-return ops return one tuple/list**
    - `sh`, `try`, `match`, `next`, `scan`, etc. push a single list value instead of multiple separate stack items.
-   - Destructure with the container protocol (`list N get`) or with a destructuring-bind shorthand.
+   - Destructure with a positional bind list, using `_!` to discard a slot.
+   - Bind arity does not need to match tuple length: excess binds receive `null`; unbound trailing slots are auto-discarded.
+   - Explicit `list N get` remains available for partial or dynamic extraction.
 
 5. **User words returning multiple values** must explicitly construct and return a list/tuple.
 
 6. **Universal coercion** replaces strict per-op type checking. Ops coerce their inputs based on context; incompatible values become `NaN` or `"NaN"` and propagate instead of dying, following JavaScript-style permissiveness.
+
+7. **Smart `print`** replaces format-string `print` for the common case. `print` consumes the top-of-stack value and emits a type-aware, recursive, human-readable representation. Formatted output moves to `printf`.
 
 ## Execution model
 
@@ -116,7 +120,11 @@ Binding remains postfix:
 value x!                     ; store and pass through
 5 x! 6 y!                    ; x=5, y=6
 "cmd" sh out! err! status!   ; destructuring bind
+"cmd" sh out! _! status!     ; bind stdout, discard stderr, bind status
+"cmd" sh _! _! status!       ; discard stdout/stderr, bind status
 ```
+
+The parser matches bindings positionally to the op's return values. `_!` means "discard this slot" (the Thanos-snap bind). If the pattern has fewer binds than the tuple has slots, the trailing unbound values are auto-discarded. If the pattern has more binds than the tuple has slots, the extra binds receive `null`.
 
 ## Examples
 
@@ -159,6 +167,102 @@ result 2 get status!
 out print
 ```
 
+## Chaining and error resolution
+
+v12 removes manual stack manipulation, but the hidden stack still enforces operand availability. The following table shows how common chaining patterns resolve:
+
+| Code | Resolution |
+|------|-----------|
+| `op1 op2 op3` (extra values produced) | Unbound values auto-discarded at the boundary. No error. |
+| `op1 op2` (op2 needs more than op1 gives) | **Underflow error** — v12 removes shuffling, not logic errors. |
+| `5 x! op` | `x!` leaves `5`; `op` consumes it if its input arity is 1. |
+| `5 x! 6 y!` | `x=5`, `y=6`; leftover `[5, 6]` auto-discarded at boundary. |
+| `5 x! y!` | `x=5`, `y=5` — pass-through gotcha. Both get the same value. |
+| `"cmd" sh out! status! process` | `err` auto-discarded; `process` underflows because destructuring leaves empty stack. |
+| `"cmd" sh out! err! status! code!` | `code = null`; stack empty. |
+| `"cmd" sh out! _! status!` | Normal destructuring. `_!` discards `err`. |
+| `"hello" 5 +` | `"hello"` coerces to `NaN`; result is `NaN`. No die. |
+| `"5" 3 +` | `"5"` coerces to `5`; result is `8`. |
+| `data len` | Length produced, nothing binds it, auto-discarded. |
+| `side_effect next_op` | `next_op` underflows if it needs input and `side_effect` produced none. |
+
+### Takeaways
+
+- Auto-discard prevents stack pollution from unbound values.
+- Underflow errors still occur when an op does not receive enough inputs.
+- Pass-through assignment is the main semantic shift from v11.
+- Destructuring fully consumes the tuple; bound values must be fetched by name.
+
+## Smart printing
+
+v12 redefines `print` as the default observation op. The goal is that an LLM can append `print` to any expression and immediately understand the resulting data.
+
+### Behavior
+
+- `print` consumes the top-of-stack value.
+- It emits a type-aware, recursive representation.
+- Formatted output remains available under `printf` (the old `print` behavior).
+
+### Output format
+
+| Input | Output |
+|-------|--------|
+| int `42` | `42` |
+| float `3.14` | `3.14` |
+| float `NaN` | `NaN` |
+| bool `1` | `true` |
+| bool `0` | `false` |
+| null / `0` handle | `null` |
+| str `hello` | `"hello"` |
+| list `[1 2 3]` | `[1, 2, 3]` |
+| dict `{a:1, b:2}` | `{a: 1, b: 2}` |
+| arr of int | `[1, 2, 3]` |
+| arr of float | `[1.0, 2.0, 3.0]` |
+| tensor | `[[...], [...]]` |
+| obj / struct | `{field1: val1, field2: val2}` |
+| chan | `<chan>` |
+| atom | `<atom: 7>` |
+| bitmap | `<bitmap: 10110>` |
+
+### Nested collections
+
+`print` recurses into nested structures with sensible defaults:
+
+```uf
+[1 [2 3] 4] print                 ; [1, [2, 2], 4]
+{a: [1 2], b: {c: 3}} print       ; {a: [1, 2], b: {c: 3}}
+```
+
+### Safety limits
+
+To prevent runaway output:
+
+- Maximum recursion depth (e.g., 8).
+- Maximum elements printed per collection (e.g., 100), with `<... N more>` for overflow.
+- Circular references rendered as `<cycle>`.
+
+### Examples
+
+```uf
+42 print                          ; 42
+"hello" print                     ; "hello"
+[1 2 3] print                     ; [1, 2, 3]
+{a: 1, b: [2 3]} print            ; {a: 1, b: [2, 3]}
+
+; formatted output still available
+"score: %d" 42 printf
+```
+
+### Stack effect
+
+`print` consumes one value and returns nothing. To inspect a value without losing it, bind it first:
+
+```uf
+data d!
+d@ print
+; d still available
+```
+
 ## Runtime and codegen impact
 
 - Remove the five opcodes from `comp/src/lex.rs` opcode tables.
@@ -176,10 +280,11 @@ v12 is not backward compatible with v11:
 - Multi-return ops change their stack effect.
 - User words that returned multiple implicit stack values must be rewritten to return an explicit list/tuple.
 - Type-strict op behavior is replaced by universal coercion; code that relied on ops dying on type mismatch will now receive `NaN` or `"NaN"` instead.
+- `print` becomes the smart observation op; old format-string `print` moves to `printf`.
 
 ## Open questions
 
-1. **Destructuring-bind shorthand**: is `sh out! err! status!` allowed, or is explicit `list N get` required?
-2. **Auto-discard boundaries**: exact rules for where unbound values are discarded (newlines, `ret`, task body ends, weave boundaries).
-3. **Tuple representation**: reuse `list`, introduce a dedicated tuple type, or use `dict` with positional keys?
-4. **Container `set` arity**: should `set` always return `v`, or only in named-operand contexts?
+1. **Auto-discard boundaries**: exact rules for where unbound values are discarded (newlines, `ret`, task body ends, weave boundaries).
+2. **Tuple representation**: reuse `list`, introduce a dedicated tuple type, or use `dict` with positional keys?
+3. **Container `set` arity**: should `set` always return `v`, or only in named-operand contexts?
+4. **Direct single-slot extraction shorthand**: keep only `list N get`, or add `.N` / `#N` sugar for extracting one slot from the preceding tuple?

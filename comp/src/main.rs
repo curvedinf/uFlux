@@ -177,17 +177,17 @@ fn skill_template() -> String {
 r#"---
 name: uflux
 description: |
-  Use µFlux (`uf`) for all inline custom tools — counting lines, transforming data, inspecting files, quick scripts. µFlux is a stack-based language compiled to C then native via `cc`, designed for LLM-authored scripts (low token count, fast, reliable). Use dense mode (glyph, `.uf`) for one-off tools; use text mode (mnemonic, `.uft`) for saved programs. Invoke inline with `uf "<code here>"` (last positional arg is treated as source if no file matches), or pipe stdin with `uf -`.
+  Use µFlux (`uf`) for all inline custom tools — counting lines, transforming data, inspecting files, quick scripts. µFlux is based on a managed hidden stack, compiled to C then native via `cc`, designed for LLM-authored scripts (low token count, fast, reliable). Use dense mode (glyph, `.uf`) for one-off tools; use text mode (mnemonic, `.uft`) for saved programs. Invoke inline with `uf "<code here>"` (last positional arg is treated as source if no file matches), or pipe stdin with `uf -`.
 ---
 
 # µFlux (uf) Agent Skill
 
-µFlux is a dynamically typed, weakly typed, stack-based language compiled to C then native via `cc`.
+µFlux is a dynamically typed, weakly typed language based on a **managed hidden stack**, compiled to C then native via `cc`.
 Programs are terse (low token count), fast, and reliable — designed for LLM-authored scripts.
 Cells are untyped 64-bit values at runtime — ints, floats, and pointers freely interconvert.
 Type inference happens at compile time where possible, but types are not enforced at the language level.
 
-**Do not model µFlux after Forth.** Despite being stack-based, µFlux has no raw jumps, no stack manipulation puzzles, and no `:`/`;` word definitions. It uses structured control flow (`if`/`ifelse`/`while`/`for` with quoted label addresses), named labels with `call`, and high-level ops like `filter`, `sort`, `vmap`, `ffold`. Think of it as a terse scripting language that happens to use a stack, not a Forth dialect.
+The data stack is an implementation detail. Source code reasons about **named local/global variables**, **literal constants**, and **the return value of the immediately preceding op**. There are no stack-manipulation primitives (`dup`, `drop`, `swp`, `ovr`, `pick`) in v12.
 
 > **Maintenance:** When `uf` is updated, regenerate this file with `uf --skill` to refresh the opcode list.
 
@@ -195,8 +195,8 @@ Type inference happens at compile time where possible, but types are not enforce
 
 Run code inline without saving a file:
 ```
-uf '"hello\n" print drop'
-uf '1 2 add "%d\n" print drop'
+uf '"hello" print'
+uf '1 2 add print'
 ```
 Or pipe via stdin: `echo '...' | uf -`
 
@@ -206,46 +206,45 @@ Or pipe via stdin: `echo '...' | uf -`
 
 - **Dense** (glyph mode, `.uf`): single-token emoji glyphs, optimized for LLM token efficiency.
   Use for **one-off tools** and inline scripts where token count matters.
-- **Text** (mnemonic mode, `.uft`): human-readable ASCII mnemonics like `dup`, `add`, `if`.
+- **Text** (mnemonic mode, `.uft`): human-readable ASCII mnemonics like `add`, `if`, `get`.
   Use for **saved programs** that humans will read, edit, and maintain.
 
 The compiler auto-detects the encoding per file: any character at or above U+13000 = dense.
 
 ## Quick reference
 
-- Stack-based: everything operates on the data stack. `1 2 add` pushes 1, pushes 2, pops both, pushes 3.
+- Values flow through named variables and op results, not a user-visible stack.
 - Comments: `;` to end of line.
-- Numbers: self-evaluating (pushed onto stack). Negative numbers allowed in text mode.
+- Numbers: self-evaluating. Negative numbers allowed in text mode.
 - Strings: `"hello\n"` — escapes: \n \t \r \0 \\ \"
-- Variables: `x!` (store), `x@` (fetch) for locals; `^x!` / `^x@` for globals; `x++` / `x+=` increment/accumulate.
-- Labels: `name:` defines; `'name` pushes address; `call name` calls.
+- Variables: `x!` (store), `x@` (fetch) for locals; `^x!` / `^x@` for globals; `x++` / `x+=` increment/accumulate. `x!` and `^x!` are pass-through in v12 (leave the value for the next op).
+- Labels: `name:` defines; `'name` pushes address; `_call name` calls.
 - Control flow: `if` (cond `'label`), `ifelse` (cond `'then_label 'else_label`), `while` (`'cond_label 'body_label`), `for` (count `'body_label`); `break`/`cont` in loop bodies only.
 - Entry point: `entry:` marks where execution starts (implicit jump from pc 0).
-- Printing: `print` with a printf-style format string on top of stack. Use `drop` to consume the return value.
-- Shell: `sh` takes a command string, pushes **3 values**: stdout, stderr, exit-status. Consume all three (e.g. `drop drop drop` to keep only stdout, or `drop drop` to keep stdout + check status).
+- Printing: `print` consumes the top-of-stack value and prints a type-aware, recursive representation. Use `fmt` to build a formatted string: `x "v=%d" fmt print`.
+- Shell: `sh` takes a command string, pushes **3 values**: stdout, stderr, exit-status. Bind them with destructuring: `"cmd" sh out! err! status!`.
+- Destructuring bind: multi-return ops (`sh`, `match`, `next`, `scan`, `try`) return a list; extract slots with `op a! b! _! c!`. Excess binds receive `null`; unbound trailing values are auto-discarded.
+- Auto-discard: unbound values at statement/line boundaries, before `ret`, and at task-body ends are silently discarded.
 - Modules: `use "name"` links -l<name> and loads mods/<name>.ufm manifest.
 - FFI: `import c"fn"(arg_types)->ret` declares C functions.
 
 ## Reserved words
 
-**Every opcode mnemonic is a reserved identifier.** You cannot use any of them as label names or variable names. The full list is in the opcode list below (191 names). For example, `iter:` is illegal because `iter` is an opcode — use a different name like `walk:` or `each:`.
+**Every opcode mnemonic is a reserved identifier.** You cannot use any of them as label names or variable names. The full list is in the opcode list below. For example, `iter:` is illegal because `iter` is an opcode — use a different name like `walk:` or `each:`.
 
 ## Removed opcodes (do not use)
 
-`jmp`, `jz`, and `je` are **deleted from the language**. Using them produces a compile error. Use structured control flow instead:
-- `jmp label` → use `call label` or `entry:`
+The following are **deleted from the language** and produce compile errors:
+- Raw jumps: `jmp`, `jz`, `je` (and the `=` token).
+- Stack manipulation: `dup`, `ovr`, `drop`, `swp`, `pick`.
+
+Use structured control flow instead:
+- `jmp label` → use `_call label` or `entry:`
 - `jz` (jump if zero) → use `if` with a `'label`
 - `je` (jump if equal) → use `eq` then `if` with a `'label`
-
-The `=` token also triggers this error — use `eq` to compare.
+- Stack juggling → use named variables and op results.
 
 ## Common mistakes
-
-**Mnemonics are abbreviated, not standard Forth names.** Do not assume Forth names work. Check the opcode list. Common mismatches:
-- `swap` → use `swp`
-- `drop` → use `drp`
-- `over` → use `ovr`
-- `@`/`!` (Forth fetch/store) → use `x@`/`x!` (locals) or `^x@`/`^x!` (globals)
 
 **There are NO inline block keywords.** `else` and `then` are NOT opcodes. You cannot write Forth-style `if ... else ... then`. You MUST define separate labels and pass their addresses:
 ```
@@ -254,9 +253,11 @@ cond 'then_label 'else_label ifelse  ; two-branch
 ```
 Where `yes:`, `then_label:`, `else_label:` are labels ending with `ret`.
 
-**`eq` compares ints and floats by value, pointers by identity.** String comparison with `eq` is unreliable — use `match`, `starts`, `ends`, or `find` for string equality.
+**`eq` compares ints and floats by value, pointers by identity.** String comparison with `eq` is unreliable — use `match`, `starts`, `ends`, or `find` for string equality. Use `seq`/`sne` for strict equality.
 
 **`split` on text with a trailing separator creates an empty trailing element.** For example `"a\nb\n" "\n" split` produces `["a", "b", ""]`. Filter empties: `lines 'nonempty filter` where `nonempty: len 0 gt ret`.
+
+**`split` is destructive** — it writes NULs into the source string in-place. Copy the string first if you need the original afterwards.
 
 **`rsplit` (regex split) may produce unexpected results.** Prefer `split` (literal separator) which is reliable.
 
@@ -264,11 +265,7 @@ Where `yes:`, `then_label:`, `else_label:` are labels ending with `ret`.
 
 **`spit` argument order is `path str`** — path is FIRST, content is SECOND (unlike shell redirection).
 
-**`sh` idiom to keep only stdout:** `"cmd" sh drop drop` (drops stderr and status, leaves stdout).
-
-**`print` returns the char count — always `drop` after it** unless you need the count.
-
-**For complex operations on handles (lists, dicts, strings), prefer storing to a variable and re-fetching** rather than `dup`-ing the handle. `dup` works for simple cases like `dup len` but can cause issues in multi-step operations.
+**`sh` idiom to keep only stdout:** `"cmd" sh out! _! _!` (binds stderr and status to discard slots, leaves stdout in `out`).
 
 **Use globals (`^x!`/`^x@`) for state shared across labels** called via `if`/`for`/`filter`/`ffold` callbacks. Locals (`x!`/`x@`) are scoped to the calling function and may not be visible inside callback labels.
 
@@ -280,9 +277,9 @@ There is no `{{}}` syntax. Create containers with opcodes:
 |-----------|--------|-------|
 | Empty list | `list` | push then: `list 42 push` |
 | Empty dict | `dict` | put then: `dict "key" val set` |
-| Typed array | `type len arr` | type = type id: int=0, float=1, ptr=2, byte=3 |
-| Tensor | `type len tensor` | same as arr |
-| String | `"hello\n"` or `str` | bare quoted strings are preferred |
+| Typed array | `len type arr` | type = type id: int=0, float=1, ptr=2, byte=3 |
+| Tensor | `len type tensor` | same as arr |
+| String | `"hello\n"` or `_str` | bare quoted strings are preferred |
 
 `push` returns a (possibly reallocated) handle — always keep the result: `lst 42 push lst!`
 
@@ -292,15 +289,16 @@ Common ops with non-obvious stack signatures:
 
 | Op | Stack effect | Notes |
 |----|-------------|-------|
-| `sh` | `cmd → stdout stderr status` | 3 return values; `/bin/sh -c` |
-| `print` | `args... fmt → n` | fmt on top; one arg per `%`; `n` = chars written, usually `drop`ped |
-| `split` | `str sep → list` | literal separator (empty sep: dies) |
+| `sh` | `cmd → [stdout,stderr,status]` | 3 return values as a list; `/bin/sh -c` |
+| `print` | `v →` | type-aware recursive representation; top-level strings print raw |
+| `fmt` | `args... fmt → str` | build a formatted string, then `print` it |
+| `split` | `str sep → list` | literal separator (empty sep: dies); **destructive** |
 | `join` | `list sep → str` | |
 | `slurp` | `path → str` | whole file |
 | `spit` | `path str →` | create/truncate |
-| `arr` | `type len → h` | type: int=0 float=1 ptr=2 byte=3 |
+| `arr` | `len type → h` | type: int=0 float=1 ptr=2 byte=3 |
 | `iter` | `h → it` | create cursor from any collection |
-| `next` | `it → v more` | `more`=0 means exhausted (`v` is 0) |
+| `next` | `it → [value, more]` | `more`=0 means exhausted (`value` is 0) |
 | `collect` | `it → list` | drain iterator into a list |
 | `ffold` | `path init fn_addr → acc` | streaming reduce over file lines; fn is `(acc line → acc)` |
 | `feach` | `path fn_addr →` | call fn per line; fn is `(line → )`, stops early if fn returns 0 |
@@ -313,170 +311,68 @@ Common ops with non-obvious stack signatures:
 
 ### Count lines in all .rs files (inline)
 ```
-uf '"find . -name "*.rs" | sort" sh drop drop "\n" split 0 "LOC: %d\n" print drop'
+uf '"find . -name "*.rs" | sort" sh out! _! _! "\n" split len print'
 ```
 
 ### ffold to count lines in a file
 ```
-"data.txt" 0 'step ffold "lines: %d\n" print drop
+"data.txt" 0 'step ffold "lines: %d" fmt print
 step:
-  ; stack: acc line — drop line, increment acc
-  drop inc ret
+  _! inc ret
 ```
 
 ### for loop
 ```
-5 'body for "done\n" print drop ret
-body: "%d\n" print drop ret
+5 'body for "done" print ret
+body:
+  "%d" fmt print ret
 ```
-
-## Forth vs µFlux — use high-level ops, not manual stack manipulation
-
-µFlux is stack-based but is **not Forth**. Avoid manual loop-and-pop patterns.
-Use the built-in high-level ops instead. Below: the Forth-style way (wrong) vs
-the µFlux way (right).
 
 ### Sum a list of numbers
-
-**Forth-style (wrong):** manual loop with iter/next, stack juggling
-```
-0 acc!
-list 10 push 20 push 30 push iter
-walk:
-  next
-  if
-    acc@ add acc!
-    call walk
-  else
-    drop
-    acc@ "sum: %d\n" print drop
-    ret
-  then
-```
-
-**µFlux (right):** one op does the work
 ```
 list 10 push 20 push 30 push
-0 'addup vfold "sum: %d\n" print drop
+0 'addup vfold "sum: %d" fmt print
 addup:
   add ret
 ```
 
 ### Double every element in an array
-
-**Forth-style (wrong):** loop index, vget, multiply, vset
 ```
-0 5 arr int nums!
-0 i!
-loop:
-  i@ 5 lt if
-    nums@ i@ vget 2 mul
-    nums@ i@ swp vset
-    i@ inc i!
-    call loop
-  else
-    drop
-  then
-```
-
-**µFlux (right):** vmap with a function
-```
-0 5 arr int
-'dbl vmap
-"first: %d\n" 0 swp vget print drop
+5 int arr nums!
+'dbl vmap nums!
+nums@ 0 get "first: %d" fmt print
 dbl:
   2 mul ret
 ```
 
 ### Keep elements greater than 3
-
-**Forth-style (wrong):** manual filter with a loop and conditional append
 ```
-0 10 range
-0 i!
-keep!
-walk:
-  i@ 10 lt if
-    i@ 3 gt if
-      keep@ i@ push keep!
-    then
-    i@ inc i!
-    call walk
-  else
-    drop
-    keep@ len "kept: %d\n" print drop
-    ret
-  then
-```
-
-**µFlux (right):** filter with a predicate
-```
-0 10 range 'big? filter len "kept: %d\n" print drop
+0 10 range 'big? filter len "kept: %d" fmt print
 big?:
   3 gt ret
 ```
 
 ### Count lines matching a pattern in a file
-
-**Forth-style (wrong):** slurp, split, iter/next loop with match per line
-```
-0 count!
-"log.txt" slurp "\n" split iter
-walk:
-  next if
-    "ERROR" match drop if
-      count@ inc count!
-    then
-    call walk
-  else
-    drop
-    count@ "errors: %d\n" print drop
-    ret
-  then
-```
-
-**µFlux (right):** feach does streaming, no slurp needed
 ```
 "log.txt" 'check feach
 0 count!
-"errors: %d\n" count@ print drop ret
+"errors: %d" count@ fmt print ret
 check:
-  "ERROR" match drop if count@ inc count! then
+  "ERROR" match _! _! if count@ inc count! then
   1 ret
 ```
 
 ### Transform a list of strings to uppercase
-
-**Forth-style (wrong):** manual loop with push/pop
 ```
 list "hello" push "world" push
-0 i!
-out!
-walk:
-  i@ 2 lt if
-    dup i@ get up
-    out@ swp push out!
-    i@ inc i!
-    call walk
-  else
-    drop
-    out@ "\n" join "%s\n" print drop
-    ret
-  then
-```
-
-**µFlux (right):** vmap on strings (or just use `up` directly)
-```
-list "hello" push "world" push
-'\n' split   ; not needed — use collect from iter
-'ucase imap collect "\n" join "%s\n" print drop
+'ucase imap collect "\n" join print
 ucase:
   up ret
 ```
 
 ## Best practices
 
-- Keep programs minimal — the stack is your state; avoid unnecessary variables.
+- Prefer named variables over chaining more than two ops in a row.
 - Use locals (`x!`/`x@`) for function-scoped state, globals (`^x!`/`^x@`) for shared state.
 - Prefer structured ops (`filter`, `sort`, `vmap`, `vfold`) over manual loops.
 - Use `slurp`/`spit` for file I/O, `sh` for shell commands, `json`/`unjson` for structured data.
@@ -646,7 +542,8 @@ fn main() {
             manifest_toks.append(&mut mt);
         }
         manifest_toks.append(&mut toks);
-        tus.push(parse(manifest_toks, &mut structs));
+        let parsed = parse(manifest_toks, &mut structs);
+        tus.push(parsed);
         mods.push(defmod);
     }
     if emitting {

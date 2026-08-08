@@ -1,39 +1,51 @@
 ; iterators
-0 5 range iter 'dbl imap collect len "%d\n" print drop
-0 5 range iter 'dbl imap collect 3 get "%d\n" print drop
-0 10 range iter 'ev ifilter collect len "%d\n" print drop
+0 5 range iter 'dbl imap collect len print
+0 5 range iter 'dbl imap collect 3 get print
+0 10 range iter 'ev ifilter collect len print
 ; next
 0 3 range iter it!
-it@ next "%d %d\n" print drop
-it@ next "%d %d\n" print drop
-it@ next drop drop
-it@ next "%d %d\n" print drop
+it@ next v! m!
+v@ print
+m@ print
+it@ next v! m!
+v@ print
+m@ print
+it@ next _! _!
+it@ next v! m!
+v@ print
+m@ print
 ; dict iter yields keys
 dict d! d@ "k1" 1 set d@ "k2" 2 set
-d@ iter collect len "%d\n" print drop
+d@ iter collect len print
 ; _str iter yields bytes
-"AB" iter collect 1 get "%d\n" print drop
+"AB" iter collect 1 get print
 ; json / unjson
 "{\"a\": 1, \"b\": [1, 2, 3], \"s\": \"hi\"}" json j!
-j@ "a" get "%d\n" print drop
-j@ "b" get 2 get "%d\n" print drop
-j@ "s" get "%s\n" print drop
-j@ unjson "%s\n" print drop
-"[1.5, 2]" json 0 get "%f\n" print drop
+j@ "a" get print
+j@ "b" get 2 get print
+j@ "s" get print
+j@ unjson print
+"[1.5, 2]" json 0 get print
 ; try / retry
-'good try "%d %d\n" print drop
-'bad try "%d %d\n" print drop
+'good try r! ok!
+r@ print
+ok@ print
+'bad try r! ok!
+r@ print
+ok@ print
 0 cnt!
-2 'flaky retry "%d %d\n" print drop
-cnt@ "%d\n" print drop
+2 'flaky retry r! ok!
+r@ print
+ok@ print
+cnt@ print
 ; spawn
 'work spawn c!
-c@ deq "%d\n" print drop
-"done\n" print drop
+c@ deq print
+"done" print
 ret
 ; --- quotation bodies ---
-dbl: 2 mul ret
-ev: 2 rem 0 eq ret
+dbl: n! n@ 2 mul ret
+ev: n! n@ 2 rem 0 eq ret
 good: 42 ret
 bad: 1 0 div ret
 flaky: cnt@ inc cnt! cnt@ 2 lt 'do_err if 99 ret

@@ -1,10 +1,12 @@
-; matmul.uft — text encoding (v11): 128x128 C=A*B, checksum=2863136768
+; matmul.uft — v12 text encoding: 128x128 C=A*B, checksum=2863136768
+
 fi:
   row! 128 'fe for ret
 fe:
   col! row@ 128 * col@ + ix!
   ^A@ ix@ row@ col@ + set
   ^B@ ix@ row@ col@ - set ret
+
 cr:
   row! 128 'dc for ret
 dc:
@@ -14,12 +16,14 @@ ij:
   j! ^A@ row@ 128 * j@ + get
   ^B@ j@ 128 * col@ + get
   * acc@ + acc! ret
+
 se:
-  ^C@ swp get ^sum@ + ^sum! ret
+  ix! ^C@ ix@ get ^sum@ + ^sum! ret
+
 entry:
   16384 _arr int ^A! 16384 _arr int ^B! 16384 _arr int ^C!
   128 'fi for
   128 'cr for
   0 ^sum!
   16384 'se for
-  ^sum@ "checksum=%d\n" print
+  ^sum@ "checksum=%d" fmt print

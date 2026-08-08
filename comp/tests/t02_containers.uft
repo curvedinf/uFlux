@@ -2,35 +2,35 @@
 dict d!
 d@ "a" 1 set
 d@ "b" 2 set
-d@ "a" get "%d\n" print
-d@ "zz" getq "%d\n" print
-d@ "b" has "%d\n" print
-d@ "zz" has "%d\n" print
-d@ len "%d\n" print
-d@ keys len "%d\n" print
+d@ "a" get print
+d@ "zz" getq print
+d@ "b" has print
+d@ "zz" has print
+d@ len print
+d@ keys len print
 d@ "a" del
-d@ "a" has "%d\n" print
+d@ "a" has print
 list l!
 l@ 10 push 20 push 30 push l!
-l@ 0 get "%d\n" print
-l@ 2 get "%d\n" print
-l@ 9 getq "%d\n" print
-l@ 1 has "%d\n" print
+l@ 0 get print
+l@ 2 get print
+l@ 9 getq print
+l@ 1 has print
 l@ 1 99 set
-l@ 1 get "%d\n" print
-"hello" 1 get "%c\n" print
-"hello" "ell" has "%d\n" print
-"hello" len "%d\n" print
-"foobar" 1 2 getq "%d\n" print
+l@ 1 get print
+"hello" 1 get print
+"hello" "ell" has print
+"hello" len print
+"foobar" 1 2 getq print
 struct P { x:int, y:int }
 _obj P p!
 p@ "x" 42 set
-p@ "x" get "%d\n" print
-p@ "y" getq "%d\n" print
-p@ "x" has "%d\n" print
-p@ keys len "%d\n" print
-p@ typeof "%d\n" print
-"str" typeof "%d\n" print
-5 typeof "%d\n" print
-l@ typeof "%d\n" print
-d@ typeof "%d\n" print
+p@ "x" get print
+p@ "y" getq print
+p@ "x" has print
+p@ keys len print
+p@ typeof print
+"str" typeof print
+5 typeof print
+l@ typeof print
+d@ typeof print

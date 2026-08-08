@@ -201,6 +201,12 @@ fn infer_bin_type(h: &str, a: VType, b: VType) -> VType {
 // stored back to their globals at flush time. Distinct var globals cannot
 // alias each other, so deferring/reordering the stores is unobservable
 // inside the block.
+
+// vcache: deferred variable stores — (var name, temp, dirty). Within a
+// block, SetV writes only the cache and GetV reads from it; dirty temps are
+// stored back to their globals at flush time. Distinct var globals cannot
+// alias each other, so deferring/reordering the stores is unobservable
+// inside the block.
 pub fn vflush(e: &mut String, vs: &mut Vec<VEntry>, vc: &mut Vec<(String, String, bool)>) {
     for (v, t, d) in vc.drain(..) {
         if d {
@@ -214,6 +220,15 @@ pub fn vflush(e: &mut String, vs: &mut Vec<VEntry>, vc: &mut Vec<(String, String
             VType::Int => e.push_str(&format!("pushi(cx,{});", t.expr)),
         }
     }
+}
+// v12 boundary discard: write back dirty variable caches and drop unbound values.
+pub fn vdiscard(e: &mut String, vs: &mut Vec<VEntry>, vc: &mut Vec<(String, String, bool)>) {
+    for (v, t, d) in vc.drain(..) {
+        if d {
+            e.push_str(&format!("var_{}={};", v, t));
+        }
+    }
+    vs.clear();
 }
 
 pub fn plab(prefix: &str, i: usize) -> String {
@@ -294,11 +309,10 @@ pub fn emit_range(
     for (i, ins) in p.ins.iter().enumerate().take(end).skip(start) {
         let mut e = String::new();
         if i > start && targets.contains(&i) {
-            vflush(&mut e, &mut vstack, &mut vcache);
+            vdiscard(&mut e, &mut vstack, &mut vcache);
         }
         e.push_str(&format!("{}: ", plab(prefix, i)));
         if suppress.contains(&i) {
-            if i == 4 { eprintln!("SUPPRESS 4 in emit_range"); }
             // PushAddr feeding an inlined FOR: the address is compile-time
             // known, so the push is elided entirely.
             o.push_str(&e);
@@ -327,6 +341,8 @@ pub fn emit_range(
                     o.push_str(&e);
                     continue;
                 }
+                // v12: flush (do not discard) so values like the if-condition
+                // that precede the address are materialized on the real stack.
                 vflush(&mut e, &mut vstack, &mut vcache);
                 // The target may live outside an inlined body range (e.g. a
                 // nested FOR body); only in-range targets get the prefix.
@@ -407,9 +423,18 @@ pub fn emit_range(
                                 continue;
                             }
                         }
+                        // Integer division / remainder must call runtime helpers
+                        // so that division-by-zero is caught (try/retry) rather
+                        // than constant-folded by the C compiler into SIGFPE.
+                        if rt == VType::Int && matches!(*h, "op_div"|"op_rem") {
+                            vpush_cell(&mut e, &mut vstack, &mut vtmp,
+                                &format!("{}({},{})", f, cell_of(&a), cell_of(&b)));
+                            o.push_str(&e);
+                            continue;
+                        }
                         let op_str = match *h {
                             "op_add" => Some("+"), "op_sub" => Some("-"),
-                            "op_mul" => Some("*"), "op_div" => Some("/"),
+                            "op_mul" => Some("*"),
                             "op_and" => Some("&"), "op_or" => Some("|"),
                             "op_xor" => Some("^"),
                             _ => None,
@@ -499,41 +524,6 @@ pub fn emit_range(
                             };
                             e.push_str(&format!("uf_cseti({},{},{});", cell_of(&hh), ix_c, cell_of(&v)));
                         }
-                        "op_dup" => {
-                            if !vstack.is_empty() {
-                                let idx = vstack.len() - 1;
-                                materialize_at(&mut e, &mut vstack, &mut vtmp, idx);
-                                let t = vstack[idx].clone();
-                                vstack.push(t);
-                            } else {
-                                e.push_str("uf_cur_op=\"op_dup\";op_dup(cx);");
-                            }
-                        }
-                        "op_ovr" => {
-                            if vstack.len() >= 2 {
-                                let idx = vstack.len() - 2;
-                                materialize_at(&mut e, &mut vstack, &mut vtmp, idx);
-                                let t = vstack[idx].clone();
-                                vstack.push(t);
-                            } else {
-                                vflush(&mut e, &mut vstack, &mut vcache);
-                                e.push_str("uf_cur_op=\"op_ovr\";op_ovr(cx);");
-                            }
-                        }
-                        "op_drp" => {
-                            if vstack.pop().is_none() {
-                                e.push_str("uf_cur_op=\"op_drp\";op_drp(cx);");
-                            }
-                        }
-                        "op_swp" => {
-                            if vstack.len() >= 2 {
-                                let n = vstack.len();
-                                vstack.swap(n - 1, n - 2);
-                            } else {
-                                vflush(&mut e, &mut vstack, &mut vcache);
-                                e.push_str("uf_cur_op=\"op_swp\";op_swp(cx);");
-                            }
-                        }
                         "op_vget" => {
                             let idx = vpop(&mut e, &mut vstack, &mut vtmp);
                             let hh = vpop(&mut e, &mut vstack, &mut vtmp);
@@ -616,6 +606,8 @@ pub fn emit_range(
                 }
             }
             Ins::For => {
+                // v12: flush virtual stack so the count/address pushed by
+                // PushAddr are on the real stack, then pop from there.
                 vflush(&mut e, &mut vstack, &mut vcache);
                 let inl = if depth < 8 {
                     inline_fors.get(&i).copied()
@@ -741,7 +733,7 @@ pub fn emit_range(
                         }
                         let mut arrps: Vec<_> = arr_ptr.iter().collect();
                         arrps.sort();
-                        e.push_str(&format!("{{int64_t cnt=pop(cx).i;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FC_{}{};cx->loops[fr].end=&&K_FE_{}{};\n", prefix, i, prefix, i));
+                        e.push_str(&format!("{{long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FC_{}{};cx->loops[fr].end=&&K_FE_{}{};\n", prefix, i, prefix, i));
                         // Only declare registers new to this loop scope;
                         // inherited ones are already in C locals from the parent.
                         for (id, (name, ty)) in &regs {
@@ -756,30 +748,24 @@ pub fn emit_range(
                             if inherited_arr.contains_key(expr.as_str()) { continue; }
                             e.push_str(&format!("double* {}=(double*)uf_data((Hdr*)({}).i);\n", name, expr));
                         }
-                        // If the body immediately DROPs the pushed iteration
-                        // index, skip both the push and the drop.
+                        e.push_str("{int64_t cnt=pop(cx).i;");
                         // If the body immediately stores the index into a
                         // register-cached Int local, assign uf_k directly
                         // and skip the push/pop/store.
-                        let skip_idx = matches!(&p.ins[bs], Ins::Simple(h) if *h == "op_drp");
-                        let reg_store = if !skip_idx {
-                            if let Ins::LocalSetI(id) = &p.ins[bs] {
-                                if let Some((name, VType::Int)) = reg.get(id) {
-                                    Some((name, *id))
-                                } else { None }
+                        let reg_store = if let Ins::LocalSetI(id) = &p.ins[bs] {
+                            if let Some((name, VType::Int)) = reg.get(id) {
+                                Some((name, *id))
                             } else { None }
                         } else { None };
-                        if skip_idx {
-                            e.push_str("for(int64_t uf_k=0;uf_k<cnt;uf_k++){\n");
-                        } else if let Some((name, _)) = &reg_store {
+                        if let Some((name, _)) = &reg_store {
                             e.push_str(&format!("for(int64_t uf_k=0;uf_k<cnt;uf_k++){{{}=uf_k;\n", name));
                         } else {
-                            e.push_str("for(int64_t uf_k=0;uf_k<cnt;uf_k++){pushi(cx,uf_k);\n");
+                            e.push_str(&format!("for(int64_t uf_k=0;uf_k<cnt;uf_k++){{pushi(cx,uf_k);\n"));
                         }
-                        let eff_bs = if skip_idx || reg_store.is_some() { bs + 1 } else { bs };
+                        let eff_bs = if reg_store.is_some() { bs + 1 } else { bs };
                         let inner = format!("{}F{}_", prefix, i);
                         emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, outlined_bodies, suppress, ext_idx, eff_bs, be, &inner, depth + 1, local_types, ins_body, &reg, numeric, &arr_ptr);
-                        e.push_str(&format!("K_FC_{}{}:;}}\nK_FE_{}{}:;", prefix, i, prefix, i));
+                        e.push_str(&format!("K_FC_{}{}:;if(cx->sp>0)pop(cx);}}\nK_FE_{}{}:;", prefix, i, prefix, i));
                         for (id, (name, ty)) in &regs {
                             if inherited.contains(id) { continue; }
                             match ty {
@@ -788,11 +774,11 @@ pub fn emit_range(
                                 _ => e.push_str(&format!("cx->locals[cx->local_base+{}]={};", id, name)),
                             }
                         }
-                        e.push_str("cx->lsp=fr;}\n");
+                        e.push_str("cx->lsp=fr;}}\n");
                     }
                     None => {
                         e.push_str(&format!(
-                        "{{const void* t=((void*)pop(cx).i);int64_t cnt=pop(cx).i;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FC_{}{};cx->loops[fr].end=&&K_FE_{}{};for(int64_t k=0;k<cnt;k++){{pushi(cx,k);cx->cs[cx->csp++]=&&K_{}{};goto *t;K_{}{}:;K_FC_{}{}:;}}K_FE_{}{}:;cx->lsp=fr;}}\n",
+                        "{{const void* t=((void*)pop(cx).i);int64_t cnt=pop(cx).i;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FC_{}{};cx->loops[fr].end=&&K_FE_{}{};for(int64_t k=0;k<cnt;k++){{pushi(cx,k);cx->cs[cx->csp++]=&&K_{}{};goto *t;K_{}{}:;if(cx->sp>0)pop(cx);K_FC_{}{}:;}}K_FE_{}{}:;cx->lsp=fr;}}\n",
                         prefix, i, prefix, i, prefix, i, prefix, i, prefix, i, prefix, i
                         ));
                     }
@@ -842,7 +828,19 @@ pub fn emit_range(
                 ))
             }
             Ins::Ret => {
-                vflush(&mut e, &mut vstack, &mut vcache);
+                // v12: auto-discard unbound values; keep only the top value as
+                // the return value. If the virtual stack is empty, assume the
+                // caller already placed the return value on the real stack.
+                if let Some(top) = vstack.pop() {
+                    vdiscard(&mut e, &mut vstack, &mut vcache);
+                    match top.ty {
+                        VType::Unknown | VType::FloatArr => e.push_str(&format!("pushc(cx,{});", top.expr)),
+                        VType::Float => e.push_str(&format!("pushf(cx,{});", top.expr)),
+                        VType::Int => e.push_str(&format!("pushi(cx,{});", top.expr)),
+                    }
+                } else {
+                    vdiscard(&mut e, &mut vstack, &mut vcache);
+                }
                 if prefix.starts_with("OB") {
                     // Inside an outlined function: RET restores the local frame
                     // and returns to caller. The frame setup/restore is split:
@@ -890,14 +888,14 @@ pub fn emit_range(
                 }
                 vflush(&mut e, &mut vstack, &mut vcache);
                 e.push_str(&format!(
-                    "{{const void* b=(const void*)pop(cx).i;Cell c=pop(cx);if(!uf_zero(c)){{cx->cs[cx->csp++]=&&K_{}{};goto *b;K_{}{}:;pop(cx);}}}}\n",
+                    "{{const void* b=(const void*)pop(cx).i;Cell c=pop(cx);if(uf_truthy(c)){{cx->cs[cx->csp++]=&&K_{}{};goto *b;K_{}{}:;}}}}\n",
                     prefix, i, prefix, i
                 ))
             }
             Ins::IfElse => {
                 vflush(&mut e, &mut vstack, &mut vcache);
                 e.push_str(&format!(
-                    "{{const void* el=(const void*)pop(cx).i;const void* th=(const void*)pop(cx).i;Cell c=pop(cx);cx->cs[cx->csp++]=&&K_{}{};goto *((!uf_zero(c))?th:el);K_{}{}:;pop(cx);}}\n",
+                    "{{const void* el=(const void*)pop(cx).i;const void* th=(const void*)pop(cx).i;Cell c=pop(cx);cx->cs[cx->csp++]=&&K_{}{};goto *((uf_truthy(c))?th:el);K_{}{}:;}}\n",
                     prefix, i, prefix, i
                 ))
             }
@@ -1027,7 +1025,7 @@ pub fn emit_range(
                         }
                         e.push_str("{\n");
                         emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, outlined_bodies, suppress, ext_idx, bbs, bbe_trim, &inner_b, depth + 1, local_types, ins_body, &reg, numeric, &arr_ptr);
-                        e.push_str(&format!("}}goto K_WC_{}{};}}\nK_WE_{}{}:;", prefix, i, prefix, i));
+                        e.push_str(&format!("}}if(cx->sp>0)pop(cx);goto K_WC_{}{};}}\nK_WE_{}{}:;", prefix, i, prefix, i));
                         for (id, (name, ty)) in &regs {
                             match ty {
                                 VType::Int => e.push_str(&format!("cx->locals[cx->local_base+{}]=uf_mki({});", id, name)),
@@ -1057,11 +1055,11 @@ pub fn emit_range(
                 ))
             }
             Ins::Break => {
-                vflush(&mut e, &mut vstack, &mut vcache);
+                vdiscard(&mut e, &mut vstack, &mut vcache);
                 e.push_str("{if(cx->lsp<=0)die(\"break outside loop\");cx->lsp--;cx->csp=cx->loops[cx->lsp].cspl;goto *cx->loops[cx->lsp].end;}\n")
             }
             Ins::Cont => {
-                vflush(&mut e, &mut vstack, &mut vcache);
+                vdiscard(&mut e, &mut vstack, &mut vcache);
                 e.push_str("{if(cx->lsp<=0)die(\"cont outside loop\");cx->csp=cx->loops[cx->lsp-1].cspl;goto *cx->loops[cx->lsp-1].cont;}\n")
             }
             Ins::SetV(v) => {
@@ -1078,6 +1076,8 @@ pub fn emit_range(
                 } else {
                     vcache.push((v.clone(), cell_expr, true));
                 }
+                // v12: assignment is pass-through; leave value on stack
+                vstack.push(t);
             }
             Ins::GetV(v) => {
                 if let Some((_, t, _)) = vcache.iter().find(|(n, _, _)| n == v) {
@@ -1089,6 +1089,11 @@ pub fn emit_range(
                 }
             }
             Ins::LocalSetI(id) => {
+                // v12: a LocalSetI that pops from an empty virtual stack is
+                // binding an incoming parameter (body continuation). Parameters
+                // are not pass-through; only assignments of already-materialized
+                // values leave the value on the hidden stack.
+                let is_param_bind = vstack.is_empty();
                 let t = vpop(&mut e, &mut vstack, &mut vtmp);
                 if let Some((name, ty)) = reg.get(id) {
                     // Register-cached slot: raw C assignment, no memory traffic
@@ -1104,6 +1109,10 @@ pub fn emit_range(
                         cell_of(&t)
                     };
                     e.push_str(&format!("{}={};", name, rhs));
+                    if !is_param_bind {
+                        // v12: assignment is pass-through; leave value on stack
+                        vstack.push(VEntry { expr: name.clone(), ty: *ty });
+                    }
                     o.push_str(&e);
                     continue;
                 }
@@ -1117,6 +1126,10 @@ pub fn emit_range(
                     VType::Int => {
                         e.push_str(&format!("cx->locals[cx->local_base+{}]=uf_mki({});", id, t.expr));
                     }
+                }
+                if !is_param_bind {
+                    // v12: assignment is pass-through; leave value on stack
+                    vstack.push(t);
                 }
             }
             Ins::LocalGetI(id) => {
@@ -1182,14 +1195,14 @@ pub fn emit_range(
                 e.push_str(&gen_call_ext(im, &format!("uf_im{}", ii)));
             }
             Ins::Send => {
-                vflush(&mut e, &mut vstack, &mut vcache);
+                vdiscard(&mut e, &mut vstack, &mut vcache);
                 e.push_str(&format!(
                 "{{int64_t mid=pop(cx).i;Cell rc=pop(cx);Hdr*h=(Hdr*)rc.i;int64_t tk=(h->tag==HT_OBJ)?1000+(int64_t)h->len:(int64_t)h->tag;const void*lab=0;for(unsigned long q=0;q<sizeof(uf_mt)/sizeof(uf_mt[0]);q++)if(uf_mt[q].tk==tk&&uf_mt[q].mh==mid){{lab=uf_mt[q].lab;break;}}if(!lab)die(\"SEND: no such method\");pushc(cx,rc);cx->cs[cx->csp++]=&&K_{}{};goto *lab;K_{}{}:;}}\n",
                 prefix, i, prefix, i
                 ))
             }
             Ins::Weave(tasks) => {
-                vflush(&mut e, &mut vstack, &mut vcache);
+                vdiscard(&mut e, &mut vstack, &mut vcache);
                 let n = tasks.len();
                 e.push_str(&format!("{{WeaveTask uf_wt[{}];\n", n));
                 for (k, t) in tasks.iter().enumerate() {
@@ -1216,7 +1229,12 @@ pub fn emit_range(
     }
     // end of range: make the ds/var state exact for whoever follows
     let mut e = String::new();
-    vflush(&mut e, &mut vstack, &mut vcache);
+    if prefix.is_empty() {
+        // v12 top-level: auto-discard any unbound values left on the stack
+        vdiscard(&mut e, &mut vstack, &mut vcache);
+    } else {
+        vflush(&mut e, &mut vstack, &mut vcache);
+    }
     o.push_str(&e);
 }
 
@@ -1429,14 +1447,6 @@ fn compute_local_types(p: &Parsed) -> (HashMap<usize, VType>, Vec<usize>, std::c
                         // inc/dec preserve type; others return Int
                         let r = if matches!(*h, "op_inc"|"op_dec") { a.0 } else { VType::Int };
                         type_stack.push((r, r == VType::Unknown && a.1));
-                    } else if matches!(*h, "op_dup") {
-                        if let Some(&t) = type_stack.last() { type_stack.push(t); }
-                    } else if matches!(*h, "op_ovr") {
-                        if type_stack.len() >= 2 { type_stack.push(type_stack[type_stack.len()-2]); }
-                    } else if matches!(*h, "op_drp") { type_stack.pop(); }
-                    else if matches!(*h, "op_swp") {
-                        let n = type_stack.len();
-                        if n >= 2 { type_stack.swap(n-1, n-2); }
                     } else if matches!(*h, "op_vget"|"op_idx") {
                         type_stack.pop(); // index
                         // FloatArr handle (float-array local or propagated
@@ -1464,16 +1474,9 @@ fn compute_local_types(p: &Parsed) -> (HashMap<usize, VType>, Vec<usize>, std::c
                 }
                 Ins::LocalSetI(id) => {
                     // Float-array handle pattern:
-                    //   <len> PushI(1) SWP ARR LocalSetI(id)
-                    // or <len> PushI(1) ARR LocalSetI(id)
+                    //   <len> PushI(1) ARR LocalSetI(id)
                     let mut is_farr = false;
-                    if i >= 3 {
-                        if let (Ins::PushI(ty), Ins::Simple(h1), Ins::Simple(h2)) =
-                            (&p.ins[i-3], &p.ins[i-2], &p.ins[i-1]) {
-                            if *h1 == "op_swp" && *h2 == "op_arr" && *ty == 1 { is_farr = true; }
-                        }
-                    }
-                    if !is_farr && i >= 2 {
+                    if i >= 2 {
                         if let (Ins::PushI(ty), Ins::Simple(h)) = (&p.ins[i-2], &p.ins[i-1]) {
                             if *h == "op_arr" && *ty == 1 { is_farr = true; }
                         }

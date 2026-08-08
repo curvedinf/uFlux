@@ -327,19 +327,88 @@ static inline int64_t uf_i(Cell c){ if(c.tag==T_PTR&&c.i&&uf_is_str(c)) return s
 static inline Cell uf_mkf(double v){ Cell c; c.tag=T_FLOAT; c.i=uf_ibits(v); return c; }
 static inline Cell uf_fromf(double v){ return uf_mkf(v); }
 static inline int uf_zero(Cell c){ return c.tag==T_FLOAT?(int64_t)uf_fbits(c.i)==0:c.i==0; }
-static inline Cell uf_cadd(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT)return uf_fromf(uf_f(a)+uf_f(b)); return uf_mki(uf_i(a)+uf_i(b)); }
-static inline Cell uf_csub(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT)return uf_fromf(uf_f(a)-uf_f(b)); return uf_mki(uf_i(a)-uf_i(b)); }
-static inline Cell uf_cmul(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT)return uf_fromf(uf_f(a)*uf_f(b)); return uf_mki(uf_i(a)*uf_i(b)); }
+static inline double uf_to_number(Cell c){
+  if(c.tag==T_INT)return (double)c.i;
+  if(c.tag==T_FLOAT)return uf_fbits(c.i);
+  if(c.tag==T_PTR && c.i){
+    Hdr*h=uf_gc_find((void*)c.i);
+    if(h){
+      if(h->tag==HT_DYN){
+        Dyn*d=(Dyn*)h;
+        if(d->len==0)return 0.0;
+        if(d->len==1)return uf_to_number(d->data[0]);
+        return NAN;
+      }
+      if(h->tag==HT_STR){
+        const char*s=uf_sptr(c); char*end; double v=strtod(s,&end);
+        if(end==s)return NAN;
+        while(isspace((unsigned char)*end))end++;
+        if(*end)return NAN;
+        return v;
+      }
+    }
+  }
+  return (double)c.i;
+}
+static inline int uf_truthy(Cell c){
+  if(c.tag==T_FLOAT){ double d=uf_fbits(c.i); return d!=0.0 && !isnan(d); }
+  if(c.tag==T_INT || c.tag==T_BYTE)return c.i!=0;
+  if(c.tag==T_PTR && c.i){
+    Hdr*h=uf_gc_find((void*)c.i);
+    if(h){
+      if(h->tag==HT_STR)return h->len!=0;
+      if(h->tag==HT_DYN)return ((Dyn*)h)->len!=0;
+      if(h->tag==HT_MAP)return ((Map*)h)->len!=0;
+      if(h->tag==HT_ARR||h->tag==HT_TENSOR||h->tag==HT_BITMAP||h->tag==HT_BLOOM)return h->len!=0;
+      return 1;
+    }
+  }
+  return 0;
+}
+static inline int uf_loose_eq(Cell a,Cell b){
+  if(a.tag==T_PTR && b.tag==T_PTR && a.i && b.i){
+    Hdr*ha=uf_gc_find((void*)a.i); Hdr*hb=uf_gc_find((void*)b.i);
+    if(ha && hb && ha->tag==HT_STR && hb->tag==HT_STR){
+      if(ha->len!=hb->len)return 0;
+      return memcmp(uf_sptr(a),uf_sptr(b),ha->len)==0;
+    }
+  }
+  double x=uf_to_number(a), y=uf_to_number(b);
+  return x==y;
+}
+static inline int uf_strict_eq(Cell a,Cell b){
+  if(a.tag!=b.tag)return 0;
+  if(a.tag==T_FLOAT)return a.i==b.i;
+  if(a.tag==T_PTR && a.i && b.i){
+    Hdr*ha=uf_gc_find((void*)a.i); Hdr*hb=uf_gc_find((void*)b.i);
+    if(ha && hb && ha->tag==HT_STR && hb->tag==HT_STR){
+      if(ha->len!=hb->len)return 0;
+      return memcmp(uf_sptr(a),uf_sptr(b),ha->len)==0;
+    }
+  }
+  return a.i==b.i;
+}
+static inline Cell uf_cadd(Cell a,Cell b){ double x=uf_to_number(a),y=uf_to_number(b); if(isnan(x)||isnan(y))return uf_mkf(NAN); if(a.tag==T_INT&&b.tag==T_INT)return uf_mki(a.i+b.i); return uf_mkf(x+y); }
+static inline Cell uf_csub(Cell a,Cell b){ double x=uf_to_number(a),y=uf_to_number(b); if(isnan(x)||isnan(y))return uf_mkf(NAN); if(a.tag==T_INT&&b.tag==T_INT)return uf_mki(a.i-b.i); return uf_mkf(x-y); }
+static inline Cell uf_cmul(Cell a,Cell b){ double x=uf_to_number(a),y=uf_to_number(b); if(isnan(x)||isnan(y))return uf_mkf(NAN); if(a.tag==T_INT&&b.tag==T_INT)return uf_mki(a.i*b.i); return uf_mkf(x*y); }
 static inline Cell uf_cand(Cell a,Cell b){ return uf_mki(uf_i(a)&uf_i(b)); }
 static inline Cell uf_cshr(Cell a){ return uf_mki((int64_t)((uint64_t)uf_i(a)>>1)); }
-static inline Cell uf_cinc(Cell a){ if(a.tag==T_FLOAT)return uf_fromf(uf_f(a)+1.0); return uf_mki(uf_i(a)+1); }
-static inline Cell uf_cdec(Cell a){ if(a.tag==T_FLOAT)return uf_fromf(uf_f(a)-1.0); return uf_mki(uf_i(a)-1); }
-static inline Cell uf_cdiv(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT)return uf_fromf(uf_f(a)/uf_f(b)); return uf_mki(uf_i(a)/uf_i(b)); }
-static inline Cell uf_crem(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT)return uf_fromf(fmod(uf_f(a),uf_f(b))); return uf_mki(uf_i(a)%uf_i(b)); }
-static inline Cell uf_clt(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT||a.tag==T_TIME||b.tag==T_TIME)return uf_mki(uf_f(a)<uf_f(b)?1:0); return uf_mki(a.i<b.i?1:0); }
-static inline Cell uf_cgt(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT||a.tag==T_TIME||b.tag==T_TIME)return uf_mki(uf_f(a)>uf_f(b)?1:0); return uf_mki(a.i>b.i?1:0); }
-static inline Cell uf_ceq(Cell a,Cell b){ if(a.tag==T_FLOAT||b.tag==T_FLOAT)return uf_mki(uf_f(a)==uf_f(b)?1:0); return uf_mki(a.i==b.i?1:0); }
-static inline Cell uf_cnot(Cell a){ return uf_mki(uf_zero(a)?1:0); }
+static inline Cell uf_cinc(Cell a){ double x=uf_to_number(a); if(isnan(x))return uf_mkf(NAN); if(a.tag==T_INT)return uf_mki(a.i+1); return uf_mkf(x+1.0); }
+static inline Cell uf_cdec(Cell a){ double x=uf_to_number(a); if(isnan(x))return uf_mkf(NAN); if(a.tag==T_INT)return uf_mki(a.i-1); return uf_mkf(x-1.0); }
+/* Division and remainder are *not* inlined by the C compiler. If they were,
+   literal `1 0 div` would be constant-folded to an undefined (1/0) expression
+   and the runtime zero-check / longjmp into try/retry would be bypassed. */
+#ifdef __GNUC__
+#define UF_NOINLINE __attribute__((noinline))
+#else
+#define UF_NOINLINE
+#endif
+static Cell UF_NOINLINE uf_cdiv(Cell a,Cell b){ double x=uf_to_number(a),y=uf_to_number(b); if(isnan(x)||isnan(y))return uf_mkf(NAN); if(y==0.0)die("DIV: division by zero"); if(a.tag==T_INT&&b.tag==T_INT)return uf_mki(a.i/b.i); return uf_mkf(x/y); }
+static Cell UF_NOINLINE uf_crem(Cell a,Cell b){ double x=uf_to_number(a),y=uf_to_number(b); if(isnan(x)||isnan(y))return uf_mkf(NAN); if(y==0.0)die("REM: division by zero"); if(a.tag==T_INT&&b.tag==T_INT)return uf_mki(a.i%b.i); return uf_mkf(fmod(x,y)); }
+static inline Cell uf_clt(Cell a,Cell b){ double x=uf_to_number(a),y=uf_to_number(b); return uf_mki(isnan(x)||isnan(y)?0:(x<y?1:0)); }
+static inline Cell uf_cgt(Cell a,Cell b){ double x=uf_to_number(a),y=uf_to_number(b); return uf_mki(isnan(x)||isnan(y)?0:(x>y?1:0)); }
+static inline Cell uf_ceq(Cell a,Cell b){ return uf_mki(uf_loose_eq(a,b)?1:0); }
+static inline Cell uf_cnot(Cell a){ return uf_mki(uf_truthy(a)?0:1); }
 static inline Cell uf_cor(Cell a,Cell b){ return uf_mki(a.i|b.i); }
 static inline Cell uf_cxor(Cell a,Cell b){ return uf_mki(a.i^b.i); }
 static inline Cell uf_cvget(Cell h,int64_t idx){ Hdr*a=(Hdr*)h.i; char*dt=uf_data(a); if(a->ety==1)return uf_mkf(((double*)dt)[idx]); if(a->ety==3)return uf_mki((int64_t)((uint8_t*)dt)[idx]); return uf_mki(((int64_t*)dt)[idx]); }
@@ -358,6 +427,33 @@ static Cell uf_str_new(const char* s, size_t n){
   return uf_mkp(r);
 }
 static Cell uf_str_dup(Cell c){ const char* s=uf_sptr(c); return uf_str_new(s,strlen(s)); }
+static void* uf_alloc(size_t sz,int align); /* forward decl for string coercion */
+/* universal string coercion */
+static Cell uf_to_string(Cell c){
+  char tmp[64];
+  if(c.tag==T_FLOAT){ double d=uf_fbits(c.i); if(isnan(d)) return uf_str_new("NaN",3); snprintf(tmp,sizeof(tmp),"%.17g",d); return uf_str_new(tmp,strlen(tmp)); }
+  if(c.tag==T_BYTE){ return c.i?uf_str_new("true",4):uf_str_new("false",5); }
+  if(c.tag==T_INT){ snprintf(tmp,sizeof(tmp),"%lld",(long long)c.i); return uf_str_new(tmp,strlen(tmp)); }
+  if(c.tag==T_PTR && !c.i) return uf_str_new("null",4);
+  if(c.tag==T_PTR && c.i){
+    Hdr*h=uf_gc_find((void*)c.i);
+    if(h){
+      if(h->tag==HT_STR){ return uf_str_new(uf_sbytes((Str*)h),h->len); }
+      if(h->tag==HT_DYN){
+        Dyn*d=(Dyn*)h; size_t cap=16,n=0; char*b=(char*)uf_alloc(cap,0);
+        for(uint64_t i=0;i<d->len;i++){
+          if(i){ while(n+1>=cap){cap*=2;b=(char*)realloc(b,cap);} b[n++]=','; }
+          Cell cs=uf_to_string(d->data[i]); const char*p=uf_sptr(cs); size_t l=strlen(p);
+          while(n+l+1>cap){ cap*=2; b=(char*)realloc(b,cap); }
+          memcpy(b+n,p,l); n+=l;
+        }
+        b[n]=0; Cell r=uf_str_new(b,n); free(b); return r;
+      }
+      if(h->tag==HT_MAP||h->tag==HT_OBJ) return uf_str_new("[object Object]",15);
+    }
+  }
+  snprintf(tmp,sizeof(tmp),"%lld",(long long)c.i); return uf_str_new(tmp,strlen(tmp));
+}
 
 /* arr element access honors the element type (ety): 0 int (8B), 1 float (8B), 3 byte (1B) */
 static inline Cell uf_cidx(Cell h,int64_t ix){ Hdr*a=(Hdr*)h.i; if(ix<0||(uint64_t)ix>=a->len)die("index out of bounds"); char*dt=uf_data(a); if(a->tag==HT_DYN)return ((Cell*)dt)[ix]; if(a->ety==3)return uf_mki((int64_t)((uint8_t*)dt)[ix]); if(a->ety==1)return uf_mkf(((double*)dt)[ix]); return uf_mki(((int64_t*)dt)[ix]); }
@@ -368,12 +464,6 @@ static inline void pushp(Ctx*cx,void* v){ pushc(cx,uf_mkp(v)); }
 static inline Cell pop(Ctx*cx){ if(cx->sp<=0){char _b[128];snprintf(_b,sizeof(_b),"stack underflow in %s (sp=%ld)",uf_cur_op,cx->sp);die(_b);} return cx->ds[--cx->sp]; }
 static void op_nop(Ctx*cx){ (void)cx; }
 
-static void op_dup(Ctx*cx){ if(cx->sp<1){char _b[128];snprintf(_b,sizeof(_b),"stack underflow in dup (need 1, have %ld)",cx->sp);die(_b);} pushc(cx,cx->ds[cx->sp-1]); }
-static void op_ovr(Ctx*cx){ if(cx->sp<2){char _b[128];snprintf(_b,sizeof(_b),"stack underflow in ovr (need 2, have %ld)",cx->sp);die(_b);} pushc(cx,cx->ds[cx->sp-2]); }
-static void op_drp(Ctx*cx){ (void)pop(cx); }
-static void op_swp(Ctx*cx){ Cell t=cx->ds[cx->sp-1]; cx->ds[cx->sp-1]=cx->ds[cx->sp-2]; cx->ds[cx->sp-2]=t; }
-static void op_pick(Ctx*cx){ int64_t n=pop(cx).i; if(n<0||n>=cx->sp)die("PICK out of range"); pushc(cx,cx->ds[cx->sp-1-n]); }
-
 static void op_add(Ctx*cx){ Cell b=pop(cx),a=pop(cx); pushc(cx,uf_cadd(a,b)); }
 static void op_sub(Ctx*cx){ Cell b=pop(cx),a=pop(cx); pushc(cx,uf_csub(a,b)); }
 static void op_mul(Ctx*cx){ Cell b=pop(cx),a=pop(cx); pushc(cx,uf_cmul(a,b)); }
@@ -383,17 +473,12 @@ static void op_inc(Ctx*cx){ pushc(cx,uf_cinc(pop(cx))); }
 static void op_dec(Ctx*cx){ pushc(cx,uf_cdec(pop(cx))); }
 
 /* v10 arithmetic & logic */
-static void op_div(Ctx*cx){ Cell b=pop(cx),a=pop(cx); if(a.tag==T_FLOAT||b.tag==T_FLOAT){ double d=uf_f(b); if(d==0.0)die("DIV: division by zero"); pushf(cx,uf_f(a)/d); } else { int64_t bv=uf_i(b); if(bv==0)die("DIV: division by zero"); pushi(cx,uf_i(a)/bv); } }
-static void op_rem(Ctx*cx){ Cell b=pop(cx),a=pop(cx); if(a.tag==T_FLOAT||b.tag==T_FLOAT){ double d=uf_f(b); if(d==0.0)die("REM: division by zero"); pushf(cx,fmod(uf_f(a),d)); } else { int64_t bv=uf_i(b); if(bv==0)die("REM: division by zero"); pushi(cx,uf_i(a)%bv); } }
-static void op_eq(Ctx*cx){
-  Cell b=pop(cx),a=pop(cx); int r;
-  if(a.tag==T_FLOAT||b.tag==T_FLOAT){ if((a.tag==T_INT||a.tag==T_FLOAT)&&(b.tag==T_INT||b.tag==T_FLOAT)) r=(uf_f(a)==uf_f(b)); else r=(a.i==b.i&&a.tag==b.tag); }
-  else if(uf_is_str(a)&&uf_is_str(b)) r=strcmp(uf_sptr(a),uf_sptr(b))==0;
-  else if((a.tag==T_PTR&&a.i&&uf_gc_find((void*)a.i))||(b.tag==T_PTR&&b.i&&uf_gc_find((void*)b.i))) r=(a.i==b.i);
-  else r=(a.i==b.i);
-  pushi(cx,r?1:0);
-}
-static int uf_cmp(Cell a,Cell b,int* ok){ /* -1/0/1; *ok=0 if incomparable */
+static void op_div(Ctx*cx){ Cell b=pop(cx),a=pop(cx); pushc(cx,uf_cdiv(a,b)); }
+static void op_rem(Ctx*cx){ Cell b=pop(cx),a=pop(cx); pushc(cx,uf_crem(a,b)); }
+static void op_eq(Ctx*cx){ Cell b=pop(cx),a=pop(cx); pushi(cx,uf_loose_eq(a,b)?1:0); }
+static void op_seq(Ctx*cx){ Cell b=pop(cx),a=pop(cx); pushi(cx,uf_strict_eq(a,b)?1:0); }
+static void op_sne(Ctx*cx){ Cell b=pop(cx),a=pop(cx); pushi(cx,uf_strict_eq(a,b)?0:1); }
+static int uf_cmp(Cell a,Cell b,int* ok){ /* -1/0/1; *ok=0 if incomparable (legacy sort order) */
   *ok=1;
   if((a.tag==T_INT||a.tag==T_FLOAT||a.tag==T_TIME||a.tag==T_DUR)&&(b.tag==T_INT||b.tag==T_FLOAT||b.tag==T_TIME||b.tag==T_DUR)){
     double x=uf_f(a),y=uf_f(b); return x<y?-1:x>y?1:0;
@@ -401,17 +486,17 @@ static int uf_cmp(Cell a,Cell b,int* ok){ /* -1/0/1; *ok=0 if incomparable */
   if(uf_is_str(a)&&uf_is_str(b)) return strcmp(uf_sptr(a),uf_sptr(b));
   *ok=0; return 0;
 }
-static void op_lt(Ctx*cx){ Cell b=pop(cx),a=pop(cx); int ok; int c=uf_cmp(a,b,&ok); if(!ok)die("LT: incomparable operands"); pushi(cx,c<0?1:0); }
-static void op_gt(Ctx*cx){ Cell b=pop(cx),a=pop(cx); int ok; int c=uf_cmp(a,b,&ok); if(!ok)die("GT: incomparable operands"); pushi(cx,c>0?1:0); }
-static void op_not(Ctx*cx){ Cell a=pop(cx); pushi(cx,uf_zero(a)?1:0); }
+static void op_lt(Ctx*cx){ Cell b=pop(cx),a=pop(cx); double x=uf_to_number(a),y=uf_to_number(b); pushi(cx,(isnan(x)||isnan(y))?0:(x<y?1:0)); }
+static void op_gt(Ctx*cx){ Cell b=pop(cx),a=pop(cx); double x=uf_to_number(a),y=uf_to_number(b); pushi(cx,(isnan(x)||isnan(y))?0:(x>y?1:0)); }
+static void op_not(Ctx*cx){ Cell a=pop(cx); pushi(cx,uf_truthy(a)?0:1); }
 static void op_or(Ctx*cx){ Cell b=pop(cx),a=pop(cx); if(a.tag==T_FLOAT||b.tag==T_FLOAT||a.tag==T_PTR||b.tag==T_PTR)die("OR: ints only"); pushi(cx,a.i|b.i); }
 static void op_xor(Ctx*cx){ Cell b=pop(cx),a=pop(cx); if(a.tag==T_FLOAT||b.tag==T_FLOAT||a.tag==T_PTR||b.tag==T_PTR)die("XOR: ints only"); pushi(cx,a.i^b.i); }
 static void op_shl(Ctx*cx){ Cell b=pop(cx),a=pop(cx); if(a.tag==T_FLOAT||b.tag==T_FLOAT||a.tag==T_PTR||b.tag==T_PTR)die("SHL: ints only"); if(b.i<0||b.i>=64)die("SHL: shift out of range"); pushi(cx,a.i<<b.i); }
 static void op_bnot(Ctx*cx){ Cell a=pop(cx); if(a.tag==T_FLOAT||a.tag==T_PTR)die("BNOT: ints only"); pushi(cx,~a.i); }
-static void op_orelse(Ctx*cx){ Cell b=pop(cx),a=pop(cx); pushc(cx,uf_zero(a)?b:a); }
+static void op_orelse(Ctx*cx){ Cell b=pop(cx),a=pop(cx); pushc(cx,uf_truthy(a)?a:b); }
 
 static void* uf_alloc(size_t sz,int align){ void*p=NULL; if(align>0){ if(posix_memalign(&p,(size_t)align,sz?sz:1))die("alloc failed"); } else { p=malloc(sz?sz:1); } if(!p)die("out of memory"); return p; }
-static void op_arrn(Ctx*cx,uint64_t tag,int align){ int64_t len=pop(cx).i, ty=pop(cx).i; int64_t esz=(ty==3)?1:8; if(len<0)die("negative length"); Hdr*h=(Hdr*)uf_gc_alloc(sizeof(Hdr)+(size_t)len*(size_t)esz,align); h->tag=tag; h->len=(uint64_t)len; h->esz=(uint64_t)esz; h->ety=(uint64_t)ty; memset(h->data,0,(size_t)len*(size_t)esz); pushp(cx,h); }
+static void op_arrn(Ctx*cx,uint64_t tag,int align){ int64_t ty=pop(cx).i, len=pop(cx).i; int64_t esz=(ty==3)?1:8; if(len<0)die("negative length"); Hdr*h=(Hdr*)uf_gc_alloc(sizeof(Hdr)+(size_t)len*(size_t)esz,align); h->tag=tag; h->len=(uint64_t)len; h->esz=(uint64_t)esz; h->ety=(uint64_t)ty; memset(h->data,0,(size_t)len*(size_t)esz); pushp(cx,h); }
 static void op_arr(Ctx*cx){ op_arrn(cx,HT_ARR,0); }
 static void op_tensor(Ctx*cx){ op_arrn(cx,HT_TENSOR,64); }
 static void op_clone(Ctx*cx){
@@ -512,16 +597,17 @@ static inline void op_getq(Ctx*cx){
     default: die("GETQ: unsupported handle");
   }
 }
-/* SET: h k v -> */
+/* SET: h k v -> v (v12 pass-through) */
 static inline void op_set(Ctx*cx){
   Cell v=pop(cx),k=pop(cx),h=pop(cx); Hdr*a=uf_handle(h,"SET");
   switch(a->tag){
-    case HT_MAP: map_put((Map*)a,k,v); return;
-    case HT_DYN: case HT_ARR: case HT_TENSOR: uf_cseti(h,k.i,v); return;
-    case HT_STR: { Str*s=(Str*)a; if(s->mlen)die("SET: mmap string is read-only"); if(k.i<0||k.i>=(int64_t)s->len)die("SET: index out of bounds"); s->data[k.i]=(char)v.i; return; }
-    case HT_OBJ: { int64_t o=uf_obj_off(a,k); if(o<0||(uint64_t)o>=a->esz)die("SET: no such field"); *(Cell*)(a->data+o)=v; return; }
+    case HT_MAP: map_put((Map*)a,k,v); break;
+    case HT_DYN: case HT_ARR: case HT_TENSOR: uf_cseti(h,k.i,v); break;
+    case HT_STR: { Str*s=(Str*)a; if(s->mlen)die("SET: mmap string is read-only"); if(k.i<0||k.i>=(int64_t)s->len)die("SET: index out of bounds"); s->data[k.i]=(char)v.i; break; }
+    case HT_OBJ: { int64_t o=uf_obj_off(a,k); if(o<0||(uint64_t)o>=a->esz)die("SET: no such field"); *(Cell*)(a->data+o)=v; break; }
     default: die("SET: unsupported handle");
   }
+  pushc(cx,v);
 }
 /* VGET: handle idx -> value (direct typed array read, no handle validation)
    Bypasses uf_handle/uf_gc_find/tag-switch. Assumes caller knows the handle
@@ -687,7 +773,7 @@ static char* uf_fmt(const char*f,Cell*a,int n){
         size_t l=strlen(d); d[l]=conv; d[l+1]=0;
         tl=snprintf(tmp,sizeof(tmp),d,uf_f(ar)); break; }
       case 's': { size_t l=strlen(d); d[l]=conv; d[l+1]=0;
-        const char* sv=uf_sptr(ar);
+        Cell str=uf_to_string(ar); const char* sv=uf_sptr(str);
         int need=snprintf(0,0,d,sv);
         while(bi+(size_t)need+1>cap){ cap*=2; buf=(char*)realloc(buf,cap); }
         snprintf(buf+bi,(size_t)need+1,d,sv);
@@ -703,11 +789,44 @@ static char* uf_fmt(const char*f,Cell*a,int n){
   buf[bi]=0; return buf;
 }
 static void op_fmt(Ctx*cx){ Cell f=pop(cx); int n=uf_count(uf_sptr(f)); Cell args[16]; if(n>16)die("FMT: too many args"); for(int k=n-1;k>=0;k--) args[k]=pop(cx); char*s=uf_fmt(uf_sptr(f),args,n); Cell r=uf_str_new(s,strlen(s)); free(s); pushc(cx,r); }
-/* PRINT: fmt args.. -> n ; fmt is ON TOP with args below it (deepest first) */
-static void op_print(Ctx*cx){ Cell f=pop(cx); int n=uf_count(uf_sptr(f)); Cell args[16]; if(n>16)die("PRINT: too many args"); for(int k=n-1;k>=0;k--) args[k]=pop(cx); char*s=uf_fmt(uf_sptr(f),args,n); int r=printf("%s",s); free(s); pushi(cx,(int64_t)r); }
-/* SCAN: fmt -> values.. count */
+/* PRINT: v -> (smart recursive printer; top-level strings raw) */
+static void uf_print_cell(Cell c,int nested){
+  if(c.tag==T_FLOAT){ double d=uf_fbits(c.i); if(isnan(d))printf("NaN"); else printf("%.17g",d); return; }
+  if(c.tag==T_BYTE){ printf(c.i?"true":"false"); return; }
+  if(c.tag==T_INT){ printf("%lld",(long long)c.i); return; }
+  if(c.tag==T_PTR && !c.i){ printf("null"); return; }
+  if(c.tag==T_PTR && c.i){
+    Hdr*h=uf_gc_find((void*)c.i);
+    if(!h){ printf("<ptr %p>",(void*)c.i); return; }
+    if(h->tag==HT_STR){
+      const char*s=uf_sbytes((Str*)h);
+      if(nested){
+        printf("\"");
+        for(const char*p=s;*p;p++){
+          if(*p=='"')printf("\\\"");
+          else if(*p=='\\')printf("\\\\");
+          else if(*p=='\n')printf("\\n");
+          else if(*p=='\t')printf("\\t");
+          else if(*p=='\r')printf("\\r");
+          else printf("%c",*p);
+        }
+        printf("\"");
+      } else { printf("%s",s); }
+      return;
+    }
+    if(h->tag==HT_DYN){ Dyn*d=(Dyn*)h; printf("["); for(uint64_t i=0;i<d->len;i++){ if(i)printf(","); uf_print_cell(d->data[i],1); } printf("]"); return; }
+    if(h->tag==HT_ARR||h->tag==HT_TENSOR){ printf("["); for(uint64_t i=0;i<h->len;i++){ if(i)printf(","); uf_print_cell(uf_cidx(c,(int64_t)i),1); } printf("]"); return; }
+    if(h->tag==HT_MAP){ Map*m=(Map*)h; printf("{"); int first=1; for(uint64_t i=0;i<m->cap;i++) if(m->st[i]==1){ if(!first)printf(","); first=0; uf_print_cell(m->keys[i],1); printf(":"); uf_print_cell(m->vals[i],1); } printf("}"); return; }
+    if(h->tag==HT_OBJ){ printf("[object Object]"); return; }
+    printf("<%s>",h->tag==HT_BUF?"buf":h->tag==HT_RING?"chan":h->tag==HT_ATOM?"atom":h->tag==HT_ITER?"iter":h->tag==HT_BITMAP?"bitmap":h->tag==HT_BLOOM?"bloom":"object");
+    return;
+  }
+  printf("%lld",(long long)c.i);
+}
+static void op_print(Ctx*cx){ Cell v=pop(cx); uf_print_cell(v,0); printf("\n"); }
+/* SCAN: fmt -> list */
 static void op_scan(Ctx*cx){
-  Cell f=pop(cx); const char*p=uf_sptr(f); int n=0;
+  Cell f=pop(cx); const char*p=uf_sptr(f); Dyn* dl=uf_dyn_new(8); UF_PROTECT(&dl); int n=0;
   for(;*p;p++){
     if(*p=='%'){
       if(p[1]=='%'){ p++; continue; }
@@ -718,14 +837,14 @@ static void op_scan(Ctx*cx){
       char conv=*p?*p:'\0';
       switch(conv){
         case 'd': case 'i': case 'u': case 'x': case 'X': case 'o': {
-          long long v; char d[8]; d[0]='%'; d[1]='l'; d[2]='l'; d[3]=conv; d[4]=0;
-          if(fscanf(stdin,d,&v)!=1) die("SCAN: input error"); pushi(cx,(int64_t)v); n++; break; }
+          long long v; char dbuf[8]; dbuf[0]='%'; dbuf[1]='l'; dbuf[2]='l'; dbuf[3]=conv; dbuf[4]=0;
+          if(fscanf(stdin,dbuf,&v)!=1) die("SCAN: input error"); uf_dyn_push(&dl,uf_mki((int64_t)v)); n++; break; }
         case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': {
-          double v; char d[8]; d[0]='%'; d[1]='l'; d[2]='f'; d[3]=0;
-          if(fscanf(stdin,d,&v)!=1) die("SCAN: input error"); pushf(cx,v); n++; break; }
+          double v; char dbuf[8]; dbuf[0]='%'; dbuf[1]='l'; dbuf[2]='f'; dbuf[3]=0;
+          if(fscanf(stdin,dbuf,&v)!=1) die("SCAN: input error"); uf_dyn_push(&dl,uf_mkf(v)); n++; break; }
         case 's': {
           char*b=(char*)uf_alloc(1<<16,0);
-          if(fscanf(stdin,"%65535s",b)!=1) die("SCAN: input error"); Cell r=uf_str_new(b,strlen(b)); free(b); pushc(cx,r); n++; break; }
+          if(fscanf(stdin,"%65535s",b)!=1) die("SCAN: input error"); Cell r=uf_str_new(b,strlen(b)); free(b); uf_dyn_push(&dl,r); n++; break; }
         default: die("SCAN: unsupported directive");
       }
     } else if(isspace((unsigned char)*p)) {
@@ -734,7 +853,7 @@ static void op_scan(Ctx*cx){
       die("SCAN: literal text in format unsupported");
     }
   }
-  pushi(cx,(int64_t)n);
+  uf_dyn_push(&dl,uf_mki((int64_t)n)); UF_UNPROTECT(); pushp(cx,dl);
 }
 static int uf_vargc(Ctx*cx){ for(int t=0;t<cx->sp;t++){ Cell fc=cx->ds[cx->sp-1-t]; if(fc.tag==T_PTR&&((void*)fc.i)&&uf_count(uf_sptr(fc))==t) return t; } die("vararg call: format string not found"); return 0; }
 
@@ -785,7 +904,7 @@ static int uf_iter_next(Ctx*cx, Iter* it, Cell* out){
     case IT_CHAN: { Ring*r=(Ring*)uf_gc_find((void*)it->src.i); if(!r)return 0; return ring_deq1(r,out)?0:1; }
     case IT_BITMAP: { Bitmap*b=(Bitmap*)uf_gc_find((void*)it->src.i); if(!b)return 0; uint64_t n=b->len; while((uint64_t)it->idx<n){ uint64_t w=(uint64_t)it->idx>>6, o=(uint64_t)it->idx&63; if((w<(n+63)/64)&&((b->words[w]>>o)&1)){ *out=uf_mki(it->idx++); return 1; } it->idx++; } return 0; }
     case IT_MAP: { Iter* in=(Iter*)uf_gc_find((void*)it->g.i); if(!in)return 0; Cell v; if(!uf_iter_next(cx,in,&v))return 0; pushc(cx,v); uf_call_addr(cx,(const void*)it->f.i,0,-1); *out=pop(cx); return 1; }
-    case IT_FILTER: { Iter* in=(Iter*)uf_gc_find((void*)it->g.i); if(!in)return 0; Cell v; while(uf_iter_next(cx,in,&v)){ pushc(cx,v); uf_call_addr(cx,(const void*)it->f.i,0,-1); Cell r=pop(cx); if(!uf_zero(r)){ *out=v; return 1; } } return 0; }
+    case IT_FILTER: { Iter* in=(Iter*)uf_gc_find((void*)it->g.i); if(!in)return 0; Cell v; while(uf_iter_next(cx,in,&v)){ pushc(cx,v); uf_call_addr(cx,(const void*)it->f.i,0,-1); Cell r=pop(cx); if(uf_truthy(r)){ *out=v; return 1; } } return 0; }
   }
   return 0;
 }
@@ -806,10 +925,13 @@ static Iter* uf_iter_new(Cell src){
   it->tag=HT_ITER; it->len=1; it->src=src; it->kind=kind; it->idx=0; it->f=uf_mki(0); it->g=uf_mki(0);
   return it;
 }
-static void op_iter(Ctx*cx){ Cell h=pop(cx); pushp(cx,uf_iter_new(h)); }
+static void op_iter(Ctx*cx){ Cell h=pop(cx); Iter*it=uf_iter_new(h); pushp(cx,it); }
 static void op_next(Ctx*cx){
   Cell h=pop(cx); Hdr*a=uf_handle(h,"NEXT"); if(a->tag!=HT_ITER)die("NEXT: not an iter");
-  Cell v; if(uf_iter_next(cx,(Iter*)a,&v)){ pushc(cx,v); pushi(cx,1); } else { pushi(cx,0); pushi(cx,0); }
+  Cell v; Dyn*d=uf_dyn_new(2); UF_PROTECT(&d);
+  if(uf_iter_next(cx,(Iter*)a,&v)){ uf_dyn_push(&d,v); uf_dyn_push(&d,uf_mki(1)); }
+  else { uf_dyn_push(&d,uf_mki(0)); uf_dyn_push(&d,uf_mki(0)); }
+  UF_UNPROTECT(); pushp(cx,d);
 }
 static Dyn* uf_collect_it(Ctx*cx, Iter* it){
   Dyn* d=uf_dyn_new(8); UF_PROTECT(&d); UF_PROTECT(&it);
@@ -1002,7 +1124,7 @@ static void op_sh(Ctx*cx){
   if(ef){ err=uf_read_all(ef); fclose(ef); remove(tmp); } else err=uf_alloc(1,0),err[0]=0;
   Cell so=uf_str_new(out,strlen(out)); Cell se=uf_str_new(err,strlen(err));
   free(out); free(err); free(full);
-  pushc(cx,so); pushc(cx,se); pushi(cx,st);
+  Dyn* shd=uf_dyn_new(3); UF_PROTECT(&shd); uf_dyn_push(&shd,so); uf_dyn_push(&shd,se); uf_dyn_push(&shd,uf_mki((int64_t)st)); UF_UNPROTECT(); pushp(cx,shd);
 #else
   int pfd[2]; if(pipe(pfd))die("SH: pipe");
   FILE* ef=tmpfile(); if(!ef)die("SH: tmpfile");
@@ -1023,7 +1145,7 @@ static void op_sh(Ctx*cx){
   rewind(ef); char*err=uf_read_all(ef); fclose(ef);
   Cell so=uf_str_new(out,strlen(out)); Cell se=uf_str_new(err,strlen(err));
   free(out); free(err);
-  pushc(cx,so); pushc(cx,se); pushi(cx,st);
+  Dyn* shd=uf_dyn_new(3); UF_PROTECT(&shd); uf_dyn_push(&shd,so); uf_dyn_push(&shd,se); uf_dyn_push(&shd,uf_mki((int64_t)st)); UF_UNPROTECT(); pushp(cx,shd);
 #endif
 }
 /* SHP: cmd -> chan (worker thread streams stdout lines, closes chan at exit) */
@@ -1230,7 +1352,7 @@ static int rx_exec(const char* pat, const char* str, RxCap* caps){
   }
 }
 
-/* MATCH (was RX): str pat -> list found (group 0 = whole match; found on top) */
+/* MATCH (was RX): str pat -> [groups found] */
 static void op_match(Ctx*cx){
   Cell pat=pop(cx),st=pop(cx);
   const char* P=uf_sptr(pat); const char* S=uf_sptr(st);
@@ -1242,10 +1364,11 @@ static void op_match(Ctx*cx){
       if(caps[i].s) uf_dyn_push_str(&d,caps[i].s,(size_t)(caps[i].e-caps[i].s));
       else uf_dyn_push_str(&d,"",0);
     }
-    UF_UNPROTECT();
-    pushp(cx,d); pushi(cx,1);
+    Dyn*r=uf_dyn_new(2); UF_PROTECT(&r); uf_dyn_push(&r,uf_mkp(d)); uf_dyn_push(&r,uf_mki(1)); UF_UNPROTECT(); UF_UNPROTECT();
+    pushp(cx,r);
   } else {
-    Dyn*d=uf_dyn_new(1); pushp(cx,d); pushi(cx,0);
+    Dyn*d=uf_dyn_new(1); UF_PROTECT(&d); Dyn*r=uf_dyn_new(2); UF_PROTECT(&r); uf_dyn_push(&r,uf_mkp(d)); uf_dyn_push(&r,uf_mki(0)); UF_UNPROTECT(); UF_UNPROTECT();
+    pushp(cx,r);
   }
 }
 /* REPLACE (was RXSUB): str pat repl -> str' (all matches; \\1..\\9, \\\\) */
@@ -1526,7 +1649,7 @@ static void op_filter(Ctx*cx){
   Dyn* r=uf_dyn_new(8); UF_PROTECT(&r);
   for(uint64_t i=0;i<s->len;i++){
     pushc(cx,s->data[i]); uf_call_addr(cx,(const void*)f.i,0,-1); Cell k=pop(cx);
-    if(!uf_zero(k)) uf_dyn_push(&r,s->data[i]);
+    if(uf_truthy(k)) uf_dyn_push(&r,s->data[i]);
   }
   UF_UNPROTECT(); UF_UNPROTECT();
   pushp(cx,r);
@@ -1535,13 +1658,13 @@ static void op_filter(Ctx*cx){
 static void op_some(Ctx*cx){
   Cell f=pop(cx),h=pop(cx); Dyn* s=uf_materialize(cx,h); UF_PROTECT(&s);
   int r=0;
-  for(uint64_t i=0;i<s->len;i++){ pushc(cx,s->data[i]); uf_call_addr(cx,(const void*)f.i,0,-1); if(!uf_zero(pop(cx))){r=1;break;} }
+  for(uint64_t i=0;i<s->len;i++){ pushc(cx,s->data[i]); uf_call_addr(cx,(const void*)f.i,0,-1); if(uf_truthy(pop(cx))){r=1;break;} }
   UF_UNPROTECT(); pushi(cx,r);
 }
 static void op_every(Ctx*cx){
   Cell f=pop(cx),h=pop(cx); Dyn* s=uf_materialize(cx,h); UF_PROTECT(&s);
   int r=1;
-  for(uint64_t i=0;i<s->len;i++){ pushc(cx,s->data[i]); uf_call_addr(cx,(const void*)f.i,0,-1); if(uf_zero(pop(cx))){r=0;break;} }
+  for(uint64_t i=0;i<s->len;i++){ pushc(cx,s->data[i]); uf_call_addr(cx,(const void*)f.i,0,-1); if(!uf_truthy(pop(cx))){r=0;break;} }
   UF_UNPROTECT(); pushi(cx,r);
 }
 
@@ -1872,7 +1995,7 @@ static void op_feach(Ctx*cx){
     while(m>0&&(line[m-1]=='\n'||line[m-1]=='\r'))line[--m]=0;
     Cell ls=uf_str_new(line,(size_t)m);
     pushc(cx,ls); uf_call_addr(cx,(const void*)f.i,0,-1); Cell k=pop(cx);
-    if(uf_zero(k))break;
+    if(!uf_truthy(k))break;
   }
   free(line); fclose(fp);
 }
@@ -2129,7 +2252,7 @@ static void op_wfind(Ctx*cx){
   while(qi<queue->len&&!found){
     Cell node=queue->data[qi++];
     pushc(cx,node); uf_call_addr(cx,(const void*)pred.i,0,-1); Cell k=pop(cx);
-    if(!uf_zero(k)){ result=node; found=1; break; }
+    if(uf_truthy(k)){ result=node; found=1; break; }
     pushc(cx,node); uf_call_addr(cx,(const void*)f.i,0,-1); Cell nb=pop(cx);
     Dyn* nbs=uf_materialize(cx,nb); UF_PROTECT(&nbs);
     for(uint64_t i=0;i<nbs->len;i++){
@@ -2326,21 +2449,22 @@ static int uf_try_once(Ctx*cx, const void* a, Cell* out){
   if(uf_cur_task)((WeaveTask*)uf_cur_task)->tolerated++;
   return 0;
 }
-/* TRY: body_addr -> result ok */
+/* TRY: body_addr -> [result ok] */
 static void op_try(Ctx*cx){
-  Cell a=pop(cx); Cell r;
-  if(uf_try_once(cx,(const void*)a.i,&r)){ pushc(cx,r); pushi(cx,1); }
-  else { pushi(cx,0); pushi(cx,0); }
+  Cell a=pop(cx); Cell r; Dyn*d=uf_dyn_new(2); UF_PROTECT(&d);
+  if(uf_try_once(cx,(const void*)a.i,&r)){ uf_dyn_push(&d,r); uf_dyn_push(&d,uf_mki(1)); }
+  else { uf_dyn_push(&d,uf_mki(0)); uf_dyn_push(&d,uf_mki(0)); }
+  UF_UNPROTECT(); pushp(cx,d);
 }
-/* RETRY: n body_addr -> result ok (up to n+1 attempts, first success stops) */
+/* RETRY: n body_addr -> [result ok] (up to n+1 attempts, first success stops) */
 static void op_retry(Ctx*cx){
   Cell a=pop(cx); int64_t n=pop(cx).i; Cell r;
   for(int64_t k=0;;k++){
     if(uf_try_once(cx,(const void*)a.i,&r)){
       if(k&&uf_cur_task)((WeaveTask*)uf_cur_task)->retries+=k;
-      pushc(cx,r); pushi(cx,1); return;
+      Dyn*d=uf_dyn_new(2); UF_PROTECT(&d); uf_dyn_push(&d,r); uf_dyn_push(&d,uf_mki(1)); UF_UNPROTECT(); pushp(cx,d); return;
     }
-    if(k>=n){ pushi(cx,0); pushi(cx,0); return; }
+    if(k>=n){ Dyn*d=uf_dyn_new(2); UF_PROTECT(&d); uf_dyn_push(&d,uf_mki(0)); uf_dyn_push(&d,uf_mki(0)); UF_UNPROTECT(); pushp(cx,d); return; }
   }
 }
 

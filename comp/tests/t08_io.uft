@@ -1,49 +1,49 @@
 ; time
 now t!
-t@ typeof "%d\n" print drop
-t@ "unix" timef "%s\n" print drop
-"1700000000.5" "unix" time "unix" timef "%s\n" print drop
+t@ typeof print
+t@ "unix" timef print
+"1700000000.5" "unix" time "unix" timef print
 ; bloom
 100 bloom b!
 b@ 42 badd
 b@ "hello" badd
-b@ 42 btest "%d\n" print drop
-b@ "hello" btest "%d\n" print drop
-b@ 43 btest "%d\n" print drop
-b@ typeof "%d\n" print drop
+b@ 42 btest print
+b@ "hello" btest print
+b@ 43 btest print
+b@ typeof print
 ; slurp / spit / argv
 "tests/out.txt" "abc123" spit
-"tests/out.txt" slurp "%s\n" print drop
-argv len "%d\n" print drop
+"tests/out.txt" slurp print
+argv len print
 ; mmap
 "tests/log.txt" mmap m!
-m@ typeof "%d\n" print drop
-m@ "ERROR" find 0 gt "%d\n" print drop
-m@ len "%d\n" print drop
+m@ typeof print
+m@ "ERROR" find 0 gt print
+m@ len print
 ; feach / ffold
 "tests/log.txt" 'pl feach
 0 c!
-"tests/log.txt" 0 'countf ffold "%d\n" print drop
+"tests/log.txt" 0 'countf ffold print
 ; fmatch
 "tests/log.txt" "ERROR.*timeout" fmatch fc!
-fc@ deq "%s\n" print drop
-fc@ deq "%d\n" print drop
+fc@ deq print
+fc@ deq print
 ; bfs / dfs / wfind
 dict g!
 g@ 1 list 2 push 3 push set
 g@ 2 list 4 push set
 g@ 3 list 4 push set
 g@ 4 list set
-1 'nb bfs len "%d\n" print drop
-1 'nb dfs len "%d\n" print drop
-1 'nb 'is4 wfind "%d\n" print drop
+1 'nb bfs len print
+1 'nb dfs len print
+1 'nb 'is4 wfind print
 ; femit
-0 3 range iter 'strf imap "tests/fem.txt" femit "%d\n" print drop
-"tests/fem.txt" slurp "%s" print drop
+0 3 range iter 'strf imap "tests/fem.txt" femit print
+"tests/fem.txt" slurp print
 ret
 ; --- quotation bodies ---
-pl: "L: %s\n" print drop 1 ret
-countf: drop inc ret
-nb: g@ swp getq ret
+pl: line! line@ "L: %s\n" fmt print 1 ret
+countf: line! acc! acc@ inc ret
+nb: n! g@ n@ getq ret
 is4: 4 eq ret
 strf: "%d" fmt ret

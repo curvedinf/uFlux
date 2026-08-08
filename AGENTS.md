@@ -1,6 +1,6 @@
 # AGENTS.md — µFlux
 
-µFlux (Micro Flux): a stack-based language compiled to C then native via `cc`. Designed for LLM-authored scripts (low token count, fast, reliable). Current revision is **v11** — **not backward compatible** with v10 (local vs. global variable semantics changed). Full language spec in `SPEC.md`.
+µFlux (Micro Flux): a language based on a managed hidden stack, compiled to C then native via `cc`. Designed for LLM-authored scripts (low token count, fast, reliable). Current revision is **v12** — **not backward compatible** with v11. Full language spec in `SPEC.md`; v12 design rationale in `SPEC_V12_PROPOSAL.md`.
 
 ## Repository Layout
 
@@ -15,7 +15,7 @@ README.md  Quickstart and project intro.
 SPEC_V11_PROPOSAL.md, WEAVE_SPEC_PROPOSAL.md  Design proposals.
 ```
 
-Compiler source map: `main.rs` (CLI/cache/cc), `lex.rs` (lexers + glyph/mnemonic tables), `parse.rs` (parser, label resolution, WEAVE DAG, v11 locals), `ast.rs` (types), `gen.rs` (C codegen + optimizations), `emit.rs` (encoding conversion), `prelude.rs` (embedded C runtime: GC, containers, opcodes, threading).
+Compiler source map: `main.rs` (CLI/cache/cc), `lex.rs` (lexers + glyph/mnemonic tables), `parse.rs` (parser, label resolution, WEAVE DAG, v12 locals/destructuring), `ast.rs` (types), `gen.rs` (C codegen + optimizations), `emit.rs` (encoding conversion), `prelude.rs` (embedded C runtime: GC, containers, opcodes, threading, coercion, smart print).
 
 ## Build
 
@@ -42,9 +42,9 @@ Runtime flags: `--gc-threshold N`, `--gc-off`, `--mt`.
 
 ## Language & FFI Reference
 
-All opcode semantics, control flow, variable scoping (`x!`/`x@` locals, `^x!`/`^x@` globals), structured concurrency (`spawn`/`chan`/`weave`), container protocol, string escapes, module system (`USE`/`import`/`extern`/`MOD`/`PUB`), and directory mode are in **`SPEC.md`**. Opcode→glyph/mnemonic tables are in `comp/src/lex.rs` (`OP_NAMES`, `OP_GLYPHS`, `text_mnemonic`).
+All semantics, control flow, variable scoping (`x!`/`x@` locals with pass-through assignment, `^x!`/`^x@` globals), structured concurrency (`spawn`/`chan`/`weave`), container protocol, string escapes, module system (`USE`/`import`/`extern`/`MOD`/`PUB`), directory mode, universal coercion, and smart `print` are in **`SPEC.md`**. Opcode→glyph/mnemonic tables are in `comp/src/lex.rs` (`OP_NAMES`, `OP_GLYPHS`, `text_mnemonic`).
 
-Key gotchas not to re-derive: raw jumps (`jmp`/`jz`/`je`) are removed — compile errors. String escapes limited to `\n \t \r \0 \\ \"`. Linking is always `-lpthread -lm` plus `-l<name>` per `USE`. Immediate-operand opcodes (`_call`, `_addr`, `_sys`, `_lit`, `_str`, `_sizeof`, `_offset`, `_obj`, `_cast`, `_arr`, `_tensor`) are `_`-prefixed in text mode — they consume the next source token at compile time. Identifiers may not start with `_`.
+Key gotchas not to re-derive: raw jumps (`jmp`/`jz`/`je`) and stack-manipulation opcodes (`dup`/`ovr`/`drop`/`swp`/`pick`) are removed — compile errors. String escapes limited to `\n \t \r \0 \\ \"`. Linking is always `-lpthread -lm` plus `-l<name>` per `USE`. Immediate-operand opcodes (`_call`, `_addr`, `_sys`, `_lit`, `_str`, `_sizeof`, `_offset`, `_obj`, `_cast`, `_arr`, `_tensor`) are `_`-prefixed in text mode — they consume the next source token at compile time. Identifiers may not start with `_`.
 
 ## Development Notes
 

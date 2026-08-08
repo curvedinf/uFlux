@@ -1,8 +1,8 @@
 ; ssl.ufm — binding manifest for USE"ssl" (links -lssl)
-𓉞c"SSL_library_init"()->int
-𓉞c"SSL_load_error_strings"()->void
-𓉞c"TLS_client_method"()->ptr
-𓉞c"SSL_CTX_new"(ptr)->ptr
-𓉞c"SSL_CTX_free"(ptr)->void
-𓉞c"SSL_new"(ptr)->ptr
-𓉞c"SSL_free"(ptr)->void
+import c"SSL_library_init"()->int
+import c"SSL_load_error_strings"()->void
+import c"TLS_client_method"()->ptr
+import c"SSL_CTX_new"(ptr)->ptr
+import c"SSL_CTX_free"(ptr)->void
+import c"SSL_new"(ptr)->ptr
+import c"SSL_free"(ptr)->void

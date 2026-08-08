@@ -2,15 +2,16 @@
 ; Creates a channel, publishes it so main can find it, then loops.
 16 chan ^cq!
 'cond 'body while
-"bg exiting\n" print drop
-ret
+"bg exiting" print
+0 ret
 
 ; publish the channel handle so main.uft can _call bg_chan to get it
 pub bg_chan:
   ^cq@ ret
 
 cond:
-  ^cq@ deq dup msg! ret
+  ^cq@ deq msg! msg@
+  ret
 body:
-  msg@ "bg got: %s\n" print drop
+  msg@ "bg got: %s" fmt print
   0 ret

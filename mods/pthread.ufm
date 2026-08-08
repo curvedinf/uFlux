@@ -1,8 +1,8 @@
 ; pthread.ufm — binding manifest for USE"pthread" (links -lpthread)
-𓉞c"pthread_create"(ptr,ptr,ptr,ptr)->int
-𓉞c"pthread_join"(ptr,ptr)->int
-𓉞c"pthread_detach"(ptr)->int
-𓉞c"pthread_self"()->ptr
-𓉞c"pthread_mutex_init"(ptr,ptr)->int
-𓉞c"pthread_mutex_lock"(ptr)->int
-𓉞c"pthread_mutex_unlock"(ptr)->int
+import c"pthread_create"(ptr,ptr,ptr,ptr)->int
+import c"pthread_join"(ptr,ptr)->int
+import c"pthread_detach"(ptr)->int
+import c"pthread_self"()->ptr
+import c"pthread_mutex_init"(ptr,ptr)->int
+import c"pthread_mutex_lock"(ptr)->int
+import c"pthread_mutex_unlock"(ptr)->int

@@ -1,4 +1,4 @@
-; chat.uft — persistent multi-user chat over HTTP (text encoding, v11)
+; chat.uft — persistent multi-user chat over HTTP (text encoding, v12)
 ;
 ; Run:  uf -c examples/text/chat.uft -o chat && ./chat        (port 8080)
 ;       ./chat 9000                                           (custom port)
@@ -24,15 +24,13 @@
 ;   POST /send    body "u=<name>&m=<text>" -> broadcast, history-capped 100
 ;
 ; FFI notes: sockets come straight from libc via IMPORT — HTTP is out of
-; core by design (SPEC: "HTTP stays out of core"). Two bridging details:
-;   * an FFI `ptr` argument is the raw cell pointer, and µFlux string/buf
-;     handles point at object headers, not at the bytes — so anything C
-;     must see as a char* goes through `str2raw` (byte copy into a malloc'd
-;     buffer) or is received into a malloc'd buffer directly (`malloc`/
-;     `free` are the raw-pointer ops; `buf` handles are headered).
-;   * the libc name `close` collides with the chan-close op mnemonic
-;     (a reserved word), so fds are closed through `_sys 1` (x86-64 syscall
-;     3 = SYS_close; `_sys 1` means "syscall with 1 extra arg").
+; core by design (SPEC: "HTTP stays out of core"). v12's `uf_sptr` turns
+; string/buf handles into char* when passing to FFI, so fixed response
+; strings and the sockaddr buffer are kept as ordinary strings and only
+; their bytes are mutated in place (string SET writes one byte).
+; The libc name `close` collides with the chan-close op mnemonic (a reserved
+; word), so fds are closed through `_sys 1` (x86-64 syscall 3 = SYS_close;
+; `_sys 1` means "syscall with 1 extra arg").
 ;
 ; Example-grade limits: no %XX URL-decoding (+ → space only), single
 ; send(2) per response (dead SSE clients are reaped on send failure).
@@ -50,23 +48,10 @@ import c"exit"(int)->void
 
 ; ---- helpers ----------------------------------------------------------
 
-; str2raw: str -> raw char* (malloc'd, NUL-terminated; caller frees).
-; Byte loop because handles point at headers; forward 8-byte storex writes
-; are safe here: each position is last written by its own iteration, and
-; the final NUL lands exactly at len (buffer is len+9 for the overrun).
-; Uses local scratch vars — called from multiple threads but each call
-; gets its own frame, so the locals are never shared.
-str2raw:
-s2s!
-s2s@ len 9 + malloc s2r!
-s2s@ len 's2c for
-0 s2r@ s2s@ len + storex
-s2r@ ret
-
-s2c: i! s2s@ i@ get s2r@ i@ + storex ret
-
-; snd: fd rawstr ->   (send entire raw C string on socket fd)
-snd: dup _call strlen 0 _call send drop ret
+; snd: fd txt ->   (send string handle on socket fd; FFI sees char*)
+snd: txt! stkfd!
+txt@ len tlen!
+stkfd@ txt@ tlen@ 0 _call send ret
 
 ; parse POST body "u=<name>&m=<text>" and enqueue [1 "name: text"]
 dopar:
@@ -82,25 +67,24 @@ kv@ 1 get "=" split 1 get "+" " " repl "\n" " " repl m!
 ; Reads a full HTTP request with a simple recv loop: first recv, then
 ; keep recv'ing until we see \r\n\r\n (end of headers) and have at least
 ; Content-Length bytes of body. Browsers send POST headers and body in
-; separate TCP segments. Uses if/ifelse/while (v11 structured control flow).
+; separate TCP segments. Uses if/ifelse/while (v12 structured control flow).
 connh:
 ^pend@ ^f!
-8192 malloc b!
-^f@ b@ 8000 0 _call recv n!
+8192 buf tb!
+^f@ tb@ 8000 0 _call recv n!
 n@ 0 lt 'nfail 'padcheck ifelse          ; n<0 -> recv error; n>=0 -> process
 0 ret
 
 nfail:                                   ; n < 0 -> recv error, release
-b@ free
 ^hs@ 0 enq 0 ret
 
 ; recv loop: keep processing until request is complete or connection closed.
 ; reread flag: 1 = need more data (loop again), 0 = done (exit loop)
 padcheck:
+tb@ 0 n@ slice ^req!
 1 reread!
 'rcond 'rbody while
-b@ free
-'route try drop drop                    ; malformed request -> still release
+'route try                              ; malformed request -> still release
 ^done@ not 'closefd if                   ; route didn't handle it -> close
 ^hs@ 0 enq 0 ret                         ; release accept loop
 
@@ -108,8 +92,6 @@ rcond:
   reread@ ret                           ; while pops this test value
 
 rbody:
-  0 b@ n@ + storex                      ; NUL-pad at current end
-  b@ "%s" fmt ^req!                      ; raw ptr -> str handle
   ^req@ "\r\n\r\n" find hoff!
   hoff@ 0 lt 'needmore 'hcheck ifelse   ; hoff<0 -> need more; hoff>=0 -> check CL
   0 ret
@@ -128,13 +110,13 @@ havecl:
   n@ total@ lt 'needmore 'allread ifelse ; n<total -> need more; n>=total -> done
   0 ret
 
-dgt: i! clstr@ i@ get 48 -
-    dup 0 lt 'dskip 'dgt2 ifelse
+dgt: i! clstr@ i@ get 48 - dig!
+    dig@ 0 lt 'dskip 'dgt2 ifelse
     0 ret
-dgt2: dup 9 gt 'dskip 'dgt3 ifelse
+dgt2: dig@ 9 gt 'dskip 'dgt3 ifelse
     0 ret
-dgt3: clen@ 10 * + clen! 0 ret
-dskip: drop 0 ret
+dgt3: clen@ 10 * dig@ + clen! 0 ret
+dskip: 0 ret
 
 ; done reading — stop the recv loop
 allread:
@@ -142,21 +124,26 @@ allread:
 
 ; need more data — recv again
 needmore:
-  ^f@ b@ n@ + 8000 n@ - 0 _call recv got!
+  ^f@ tb@ 8000 0 _call recv got!
   got@ 1 lt 'allread 'havemore ifelse    ; got<=0 -> closed; got>=1 -> append
   0 ret
 
 havemore:
+  tb@ 0 got@ slice part!
+  ^req@ part@ cat ^req!
   n@ got@ + n!
   1 reread! 0 ret
 
-closefd: ^f@ 3 _sys 1 drop 0 ret
+closefd: ^f@ 3 _sys 1 0 ret
 
 ; ---- routing ----
 
 route:
 0 ^done!
-^req@ "\r\n" split 0 get " " split rl!
+; split is destructive (writes NULs in-place), so parse a copy and leave
+; the global ^req intact for the body parser in dopar/ssd.
+^req@ 0 ^req@ len slice reqcpy!
+reqcpy@ "\r\n" split 0 get " " split rl!
 rl@ 0 get meth!
 rl@ 1 getq path!
 meth@ "GET"  eq path@ "/events" eq and 'sev if
@@ -169,12 +156,18 @@ sev: ^f@ ^evh@ _call snd
      ^ev@ list 0 push ^f@ push enq      ; register fd with broker (fd stays open)
      1 ^done! 0 ret
 
-spg: ^f@ ^presp@ _call snd ^f@ 3 _sys 1 drop 1 ^done! 0 ret
+spg: ^f@ ^presp@ _call snd
+     ^f@ 3 _sys 1
+     1 ^done! 0 ret
 
-ssd: 'dopar try drop drop
-     ^f@ ^okr@ _call snd ^f@ 3 _sys 1 drop 1 ^done! 0 ret
+ssd: 'dopar try
+     ^f@ ^okr@ _call snd
+     ^f@ 3 _sys 1
+     1 ^done! 0 ret
 
-r404: ^f@ ^nfr@ _call snd ^f@ 3 _sys 1 drop 1 ^done! 0 ret
+r404: ^f@ ^nfr@ _call snd
+      ^f@ 3 _sys 1
+      1 ^done! 0 ret
 
 ; ---- broker: sole owner of cl (client fds) and hist (frames) ----------
 
@@ -196,66 +189,67 @@ e@ 1 get f2!
 ^hist@ len 'brep for
 0 ret
 
-brep: i! ^hist@ i@ get _call str2raw tmp!
-      f2@ tmp@ _call snd
-      tmp@ free ret
+brep: i! ^hist@ i@ get msg!
+      f2@ msg@ _call snd ret
 
 bmsg:                                  ; e = [1 msg]: frame, store, fan out
 "data: " e@ 1 get cat "\n\n" cat fr!
 ^hist@ fr@ push ^hist!
 ^hist@ len 100 gt 'hcap if
-fr@ _call str2raw frr!
 list cl2!                              ; start fresh live-client list
 ^cl@ len 'bc for                        ; fan out to all registered clients
 cl2@ ^cl!                               ; replace cl with the live-client list
-frr@ free
 0 ret
 
 bc: i! ^cl@ i@ get bf!
-    bf@ frr@ frr@ _call strlen 0 _call send 0 lt 'bdead 'balive ifelse
+    bf@ fr@ fr@ len 0 _call send 0 lt 'bdead 'balive ifelse
     ret
 
 balive: cl2@ bf@ push cl2! 0 ret       ; client still alive: keep in new list
-bdead:  bf@ 3 _sys 1 drop 0 ret         ; send failed: close fd, drop client
+bdead:  bf@ 3 _sys 1 0 ret              ; send failed: close fd, drop client
 hcap:   ^hist@ ^hist@ len 100 - ^hist@ len slice ^hist! 0 ret
 
 ; ---- startup ----------------------------------------------------------
 
 parg: argv 1 get atoi port! 0 ret
 
-bfail: "bind failed — port already in use?\n" print drop 1 _call exit 0 ret
+bfail: "bind failed — port already in use?\n" print
+       1 _call exit
+       0 ret
 
 entry:
-1 9 _call prctl drop                   ; PR_SET_PDEATHSIG(1)=9(SIGKILL): die if parent exits
+1 9 _call prctl                        ; PR_SET_PDEATHSIG(1)=9(SIGKILL): die if parent exits
 8080 port!
 argv len 1 gt 'parg if
 
 ; chat page (no % chars — string ops never see a format string here)
 "<!doctype html><meta charset=utf-8><title>uflux chat</title><style>body{font-family:sans-serif;max-width:42em;margin:2em auto}#log{white-space:pre-wrap;border:1px solid #bbb;padding:1em;min-height:14em}</style><h3>µFlux chat</h3><div id=log></div><p><input id=u placeholder=name size=10> <input id=m placeholder=message size=32 onkeydown=\"if(event.key=='Enter')go()\"> <button onclick=go()>send</button><script>var L=document.getElementById('log');new EventSource('/events').onmessage=function(e){L.textContent+=e.data+'\\n'};function go(){var m=document.getElementById('m');fetch('/send',{method:'POST',body:'u='+encodeURIComponent(document.getElementById('u').value)+'&m='+encodeURIComponent(m.value)});m.value=''}</script>" page!
 
-; precomputed responses (built once, converted to raw C strings once)
+; precomputed responses (string handles; FFI sees char* via uf_sptr)
 page@ len "%d" fmt plen!
-"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: " plen@ cat "\r\nConnection: close\r\n\r\n" cat page@ cat _call str2raw ^presp!
-"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok" _call str2raw ^okr!
-"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" _call str2raw ^nfr!
-"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n: hi\n\n" _call str2raw ^evh!
+"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: " plen@ cat "\r\nConnection: close\r\n\r\n" cat page@ cat ^presp!
+"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok" ^okr!
+"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" ^nfr!
+"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n: hi\n\n" ^evh!
 
 ; listener socket: AF_INET=2 SOCK_STREAM=1, SO_REUSEADDR, INADDR_ANY
 2 1 0 _call socket lfd!
-8 malloc opt! 1 opt@ storex
-lfd@ 1 2 opt@ 4 _call setsockopt drop  ; SOL_SOCKET=1 SO_REUSEADDR=2
-16 malloc sa!
-port@ 256 div 16 shl port@ 256 rem 24 shl or 2 or sa@ storex
-0 sa@ 8 + storex                      ; sin_addr=INADDR_ANY, zero pad
+"\0\0\0\0" opt!
+opt@ 0 1 set
+lfd@ 1 2 opt@ 4 _call setsockopt        ; SOL_SOCKET=1 SO_REUSEADDR=2
+"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" sa!
+sa@ 0 2 set
+sa@ 2 port@ 256 div set
+sa@ 3 port@ 256 rem set
 lfd@ sa@ 16 _call bind 0 lt 'bfail if
-lfd@ 64 _call listen drop
+lfd@ 64 _call listen
 
-port@ "uflux chat on :%d — open it in two browser tabs\n" print drop
+port@ "uflux chat on :%d — open it in two browser tabs\n" fmt print
 
 64 chan ^ev!                           ; broker event queue
 1 chan ^hs!                            ; accept<->handler handshake
 list ^cl! list ^hist!                   ; broker-owned state
-'broker spawn drop
+'broker spawn                          ; start broker thread
 
 ; accept loop (persistent): hand fd to a spawned handler, one at a time
 'acond 'abody while
@@ -263,6 +257,6 @@ list ^cl! list ^hist!                   ; broker-owned state
 acond: 1 ret
 abody:
 lfd@ 0 0 _call accept ^pend!
-'connh spawn drop
-^hs@ deq drop                          ; wait until handler is done
+'connh spawn                           ; handle this connection
+^hs@ deq                               ; wait until handler is done
 0 ret

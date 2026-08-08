@@ -23,6 +23,7 @@ pub enum Tok {
     AddLocal(String),             // x+= — local accumulate from stack
     IncGlobal(String),            // ^x++ — global increment by 1
     AddGlobal(String),            // ^x+= — global accumulate from stack
+    Discard,                      // _! — discard one slot in destructuring bind
     Import(Import),
     Export(String),
     Extern(String),

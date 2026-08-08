@@ -1,12 +1,12 @@
 ; m.ufm — binding manifest for USE"m" (links -lm)
-𓉞c"sqrt"(float)->float
-𓉞c"pow"(float,float)->float
-𓉞c"sin"(float)->float
-𓉞c"cos"(float)->float
-𓉞c"tan"(float)->float
-𓉞c"exp"(float)->float
-𓉞c"log"(float)->float
-𓉞c"floor"(float)->float
-𓉞c"ceil"(float)->float
-𓉞c"fabs"(float)->float
-𓉞c"fmod"(float,float)->float
+import c"sqrt"(float)->float
+import c"pow"(float,float)->float
+import c"sin"(float)->float
+import c"cos"(float)->float
+import c"tan"(float)->float
+import c"exp"(float)->float
+import c"log"(float)->float
+import c"floor"(float)->float
+import c"ceil"(float)->float
+import c"fabs"(float)->float
+import c"fmod"(float,float)->float
