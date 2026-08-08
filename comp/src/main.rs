@@ -134,9 +134,18 @@ fn discover_directory(root: &str) -> (Vec<String>, Vec<bool>) {
     (files, init_flags)
 }
 
-// locate mods/<name>.ufm in CWD, ~/.uflux/mods, then each $UFMODPATH dir
-fn find_manifest(name: &str) -> Option<String> {
-    let mut candidates: Vec<std::path::PathBuf> = vec![std::path::PathBuf::from(format!("mods/{}.ufm", name))];
+// locate mods/<name>.ufm by walking up from the input's directory, then CWD,
+// ~/.uflux/mods, and finally each $UFMODPATH dir.
+fn find_manifest(name: &str, base: Option<&std::path::Path>) -> Option<String> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(b) = base {
+        let mut dir = if b.is_file() { b.parent() } else { Some(b) };
+        while let Some(d) = dir {
+            candidates.push(d.join(format!("mods/{}.ufm", name)));
+            dir = d.parent();
+        }
+    }
+    candidates.push(std::path::PathBuf::from(format!("mods/{}.ufm", name)));
     if let Ok(home) = env::var("HOME") {
         candidates.push(std::path::PathBuf::from(format!("{}/.uflux/mods/{}.ufm", home, name)));
     }
@@ -534,9 +543,14 @@ fn main() {
                 _ => None,
             })
             .collect();
+        let is_path = input != "-"
+            && (input.ends_with(".uf") || input.ends_with(".uft") || std::path::Path::new(input).exists());
+        let canon_base = is_path.then(|| std::path::Path::new(input).canonicalize().ok()).flatten();
+        let base_path = canon_base.as_deref();
         let mut manifest_toks = Vec::new();
         for u in &uses {
-            let msrc = find_manifest(u).unwrap_or_else(|| panic!("USE\"{}\": no mods/{}.ufm found (searched CWD/mods, ~/.uflux/mods, UFMODPATH)", u, u));
+            let msrc = find_manifest(u, base_path)
+                .unwrap_or_else(|| panic!("USE\"{}\": no mods/{}.ufm found (searched near input, CWD/mods, ~/.uflux/mods, UFMODPATH)", u, u));
             hash_src.push_str(&msrc);
             let mut mt = lex_source(&msrc);
             manifest_toks.append(&mut mt);

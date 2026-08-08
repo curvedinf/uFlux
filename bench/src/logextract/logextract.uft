@@ -1,17 +1,16 @@
 fl:
-nf! drop
-nf@ 10 lt not 'proc if
-0 ret
+nf! acc!
+nf@ 10 lt 'skip 'proc ifelse
+acc@ ret
+skip:
+ret
 proc:
-3 13 2 fsget atoi hr!
-^hrs@ hr@ 1 addto
+^hrs@ 3 13 2 fsget atoi 1 addto
 ^sc@ 0 finc
-8 0 fbyte 48 - cls!
-^sd@ cls@ 1 addto
-9 fatoi by!
-^tb@ by@ + ^tb!
-^tl@ 1 + ^tl!
-0 ret
+^sd@ 8 0 fbyte 48 - 1 addto
+^gd@ "b" 9 fatoi addto
+^gd@ "l" 1 addto
+ret
 emitip:
 idx!
 ipairs@ idx@ get pair!
@@ -19,31 +18,34 @@ pair@ 0 get ipk!
 pair@ 1 get ipcnt!
 rank@ 1 + rank!
 rank@ ipk@ ipcnt@
-"top_ip_%d: %s (%d)\n" print drop
+"top_ip_%d: %s (%d)" fmt print
 ret
 hpf:
 k!
 ^hrs@ k@ getq hv!
-k@ hv@ "hour_%02d: %d\n" print drop
+k@ hv@ "hour_%02d: %d" fmt print
 ret
 useargv:
 argv 1 get p!
 0 ret
 entry
-0 ^tl! 0 ^tb! 0 rank!
+0 rank!
+dict ^gd!
+"b" 0 ^gd@ set
+"l" 0 ^gd@ set
 dict ^sc!
 dict ^hrs!
 dict ^sd!
 "bench/data/access.log" p!
 hasargs 'useargv if
-p@ " " 0 'fl fsplit drop
-"=== LOG EXTRACTION RESULTS ===\n" print drop
-^tl@ "total_lines: %d\n" print
-^tb@ "total_bytes: %d\n" print
-^sd@ 2 getq "status_2xx: %d\n" print drop
-^sd@ 3 getq "status_3xx: %d\n" print drop
-^sd@ 4 getq "status_4xx: %d\n" print drop
-^sd@ 5 getq "status_5xx: %d\n" print drop
+p@ " " 0 'fl fsplit
+"=== LOG EXTRACTION RESULTS ===" print
+^gd@ "l" getq "total_lines: %d" fmt print
+^gd@ "b" getq "total_bytes: %d" fmt print
+^sd@ 2 getq "status_2xx: %d" fmt print
+^sd@ 3 getq "status_3xx: %d" fmt print
+^sd@ 4 getq "status_4xx: %d" fmt print
+^sd@ 5 getq "status_5xx: %d" fmt print
 24 'hpf for
 ^sc@ 10 topn ipairs!
 ipairs@ len 'emitip for

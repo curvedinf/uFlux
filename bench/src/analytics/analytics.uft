@@ -1,18 +1,18 @@
 fl:
-drop drop
-^first@ not 'proc if
+nf! acc!
+^first@ 'hdr 'proc ifelse
+acc@ ret
+hdr:
 0 ^first!
-0 ret
+ret
 proc:
-7 fatoi units!
-10 fatof total!
-^tr@ total@ + ^tr!
-^tu@ units@ + ^tu!
-^rr@ 2 total@ faddto
-^pr@ 4 total@ faddto
-^cr@ 3 total@ faddto
-^rows@ 1 + ^rows!
-0 ret
+^rr@ 2 10 fatof faddto
+^pr@ 4 10 fatof faddto
+^cr@ 3 10 fatof faddto
+^gd@ "u" 7 fatoi addto
+^gd@ "t" 10 fatof addto
+^gd@ "l" 1 addto
+ret
 emitrow:
 idx!
 curdict@ n@ topn pairs!
@@ -20,24 +20,29 @@ pairs@ idx@ get kv!
 kv@ 0 get name!
 kv@ 1 get val!
 rank@ 1 + rank!
-prefix@ rank@ name@ val@ "%s%d: %s $%.2f\n" print drop
+prefix@ rank@ name@ val@ "%s%d: %s $%.2f" fmt print
 ret
 useargv:
 argv 1 get p!
 0 ret
 entry
-0 ^tr! 0 ^tu! 0 ^rows! 1 ^first!
+0 ^rows! 1 ^first!
+dict ^gd!
+"r" 0 ^gd@ set
+"t" 0.0 ^gd@ set
+"l" 0 ^gd@ set
+"u" 0 ^gd@ set
 dict ^rr!
 dict ^pr!
 dict ^cr!
 "bench/data/sales.csv" p!
 hasargs 'useargv if
-p@ "," 0 'fl fsplit drop
-"=== DATA ANALYTICS RESULTS ===\n" print drop
-^rows@ "total_rows: %d\n" print
-^tr@ "total_revenue: %.2f\n" print
-^tr@ ^rows@ div "avg_order: %.2f\n" print
-^tu@ "total_units: %d\n" print
+p@ "," 0 'fl fsplit
+"=== DATA ANALYTICS RESULTS ===" print
+^gd@ "l" getq "total_rows: %d" fmt print
+^gd@ "t" getq "total_revenue: %.2f" fmt print
+^gd@ "t" getq ^gd@ "l" getq div "avg_order: %.2f" fmt print
+^gd@ "u" getq "total_units: %d" fmt print
 "region_" prefix!
 ^rr@ curdict! 6 n! 0 rank!
 curdict@ n@ topn pairs!

@@ -2,35 +2,43 @@ import c"sqrt"(float)->float
 av:
 an! av!
 an@ _arr float tmp!
-an@ 'avbody for
+0 i!
+'icond 'ibody while
 tmp@ ret
-avbody:
-i!
+icond:
+i@ an@ lt ret
+ibody:
 0 sm!
 an@ 'avinner for
 tmp@ i@ sm@ vset
-ret
+i@ inc i!
+0 ret
 avinner:
-j!
-i@ j@ + dup 1 + * 2 div i@ + 1 + ea!
-av@ j@ vget ea@ div sm@ + sm!
-ret
+k!
+i@ k@ + sum!
+sum@ sum@ 1 + * 2 div i@ + 1 + ea!
+av@ k@ vget ea@ div sm@ + sm!
+0 ret
 atv:
 bn! bv!
 bn@ _arr float tmp!
-bn@ 'atbody for
+0 i!
+'cond2 'body2 while
 tmp@ ret
-atbody:
-i!
+cond2:
+i@ bn@ lt ret
+body2:
 0 sm!
 bn@ 'atinner for
 tmp@ i@ sm@ vset
-ret
+i@ inc i!
+0 ret
 atinner:
-j!
-j@ i@ + dup 1 + * 2 div j@ + 1 + ea!
-bv@ j@ vget ea@ div sm@ + sm!
-ret
+k!
+k@ i@ + sum!
+sum@ sum@ 1 + * 2 div k@ + 1 + ea!
+bv@ k@ vget ea@ div sm@ + sm!
+0 ret
 atac:
 n! x!
 n@ an! n@ bn!
@@ -47,7 +55,7 @@ n@ 'ubody for
 0 vbv!
 0 vv!
 n@ 'sbody for
-vbv@ vv@ div _call sqrt "%.9f\n" print
+vbv@ vv@ div _call sqrt "%.9f" fmt print
 ret
 setn:
 1 argi n!
@@ -57,7 +65,7 @@ k!
 u@ k@ 1.0 vset
 ret
 itbody:
-drop
+k!
 u@ n@ _call atac v!
 v@ n@ _call atac u!
 ret

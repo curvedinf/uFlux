@@ -733,7 +733,7 @@ pub fn emit_range(
                         }
                         let mut arrps: Vec<_> = arr_ptr.iter().collect();
                         arrps.sort();
-                        e.push_str(&format!("{{long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FC_{}{};cx->loops[fr].end=&&K_FE_{}{};\n", prefix, i, prefix, i));
+                        e.push_str(&format!("{{long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FC_{}{};cx->loops[fr].end=&&K_FE_{}{};long _sp0=cx->sp;\n", prefix, i, prefix, i));
                         // Only declare registers new to this loop scope;
                         // inherited ones are already in C locals from the parent.
                         for (id, (name, ty)) in &regs {
@@ -765,7 +765,7 @@ pub fn emit_range(
                         let eff_bs = if reg_store.is_some() { bs + 1 } else { bs };
                         let inner = format!("{}F{}_", prefix, i);
                         emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, outlined_bodies, suppress, ext_idx, eff_bs, be, &inner, depth + 1, local_types, ins_body, &reg, numeric, &arr_ptr);
-                        e.push_str(&format!("K_FC_{}{}:;if(cx->sp>0)pop(cx);}}\nK_FE_{}{}:;", prefix, i, prefix, i));
+                        e.push_str(&format!("K_FC_{}{}:;cx->sp=_sp0;}}\nK_FE_{}{}:;", prefix, i, prefix, i));
                         for (id, (name, ty)) in &regs {
                             if inherited.contains(id) { continue; }
                             match ty {
@@ -976,7 +976,7 @@ pub fn emit_range(
                         }
                         let mut arrps: Vec<_> = arr_ptr.iter().collect();
                         arrps.sort();
-                        e.push_str(&format!("{{long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_WC_{}{};cx->loops[fr].end=&&K_WE_{}{};\n", prefix, i, prefix, i));
+                        e.push_str(&format!("{{long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_WC_{}{};cx->loops[fr].end=&&K_WE_{}{};long _sp0=cx->sp;\n", prefix, i, prefix, i));
                         for (id, (name, ty)) in &regs {
                             match ty {
                                 VType::Int => e.push_str(&format!("int64_t {}=uf_i(cx->locals[cx->local_base+{}]);\n", name, id)),
@@ -1025,7 +1025,7 @@ pub fn emit_range(
                         }
                         e.push_str("{\n");
                         emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, outlined_bodies, suppress, ext_idx, bbs, bbe_trim, &inner_b, depth + 1, local_types, ins_body, &reg, numeric, &arr_ptr);
-                        e.push_str(&format!("}}if(cx->sp>0)pop(cx);goto K_WC_{}{};}}\nK_WE_{}{}:;", prefix, i, prefix, i));
+                        e.push_str(&format!("}}cx->sp=_sp0;goto K_WC_{}{};}}\nK_WE_{}{}:;", prefix, i, prefix, i));
                         for (id, (name, ty)) in &regs {
                             match ty {
                                 VType::Int => e.push_str(&format!("cx->locals[cx->local_base+{}]=uf_mki({});", id, name)),

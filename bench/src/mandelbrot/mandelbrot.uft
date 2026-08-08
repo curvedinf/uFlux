@@ -1,34 +1,41 @@
 ; mandelbrot.uft — counts bounded points in the mandelbrot set
+; Uses a float array for inner-loop state to avoid pass-through accumulation
+; in inlined while bodies (vset has no pass-through, unlike local !).
 entry
 1000 n!
 hasargs 'setn if
+5 _arr float st!
 0 count!
 n@ 'ybody for
-count@ "%d\n" print
+count@ "%d" fmt print
 ret
 
 ybody:
-  2.0 * n@ div 1.0 - ci!
-  n@ 'xbody for
-  ret
+k!
+st@ 3 2.0 k@ * n@ div 1.0 - vset
+n@ 'xbody for
+ret
 
 xbody:
-  2.0 * n@ div 1.5 - cr!
-  0.0 zr! 0.0 zi!
-  50 'ibody for
-  zr@ zr@ * zi@ zi@ * + 4.0 lt
-  count@ + count!
-  ret
+k!
+st@ 2 2.0 k@ * n@ div 1.5 - vset
+st@ 0 0.0 vset
+st@ 1 0.0 vset
+0 i!
+'icond 'ibody while
+st@ 0 vget st@ 0 vget * st@ 1 vget st@ 1 vget * + 4.0 gt not count@ + count!
+ret
+
+icond:
+i@ 50 lt st@ 0 vget st@ 0 vget * st@ 1 vget st@ 1 vget * + 4.0 gt not and ret
 
 ibody:
-  drop
-  zr@ zr@ * zi@ zi@ * - zrn!
-  zr@ zi@ 2.0 * * ci@ + zi!
-  zrn@ cr@ + zr!
-  zr@ zr@ * zi@ zi@ * + 4.0 gt 'esc if
-  ret
-  esc: break ret
+st@ 4 st@ 0 vget st@ 0 vget * st@ 1 vget st@ 1 vget * - st@ 2 vget + vset
+st@ 1 st@ 0 vget st@ 1 vget 2.0 * * st@ 3 vget + vset
+st@ 0 st@ 4 vget vset
+i@ inc i!
+0 ret
 
 setn:
-  1 argi n!
-  0 ret
+1 argi n!
+0 ret
