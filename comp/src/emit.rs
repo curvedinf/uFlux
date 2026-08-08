@@ -55,7 +55,7 @@ pub fn emit_text(toks: &[Tok]) -> String {
                 let fs: Vec<String> = fields.iter().map(|(f, t)| format!("{}:{}", f, t)).collect();
                 o.push_str(&format!("struct {} {{ {} }} ", n, fs.join(", ")));
             }
-            Tok::Sys(n) => o.push_str(&format!("sys {} ", n)),
+            Tok::Sys(n) => o.push_str(&format!("_sys {} ", n)),
             Tok::Ident(n) => o.push_str(&format!("{} ", n)),
             Tok::LabelDef(n) => o.push_str(&format!("{}: ", n)),
             Tok::Entry => o.push_str("entry: "),

@@ -31,8 +31,8 @@
 ;     buffer) or is received into a malloc'd buffer directly (`malloc`/
 ;     `free` are the raw-pointer ops; `buf` handles are headered).
 ;   * the libc name `close` collides with the chan-close op mnemonic
-;     (a reserved word), so fds are closed through `sys 1` (x86-64 syscall
-;     3 = SYS_close; `sys 1` means "syscall with 1 extra arg").
+;     (a reserved word), so fds are closed through `_sys 1` (x86-64 syscall
+;     3 = SYS_close; `_sys 1` means "syscall with 1 extra arg").
 ;
 ; Example-grade limits: no %XX URL-decoding (+ → space only), single
 ; send(2) per response (dead SSE clients are reaped on send failure).
@@ -66,7 +66,7 @@ s2r@ ret
 s2c: i! s2s@ i@ get s2r@ i@ + storex ret
 
 ; snd: fd rawstr ->   (send entire raw C string on socket fd)
-snd: dup call strlen 0 call send drop ret
+snd: dup _call strlen 0 _call send drop ret
 
 ; parse POST body "u=<name>&m=<text>" and enqueue [1 "name: text"]
 dopar:
@@ -86,7 +86,7 @@ kv@ 1 get "=" split 1 get "+" " " repl "\n" " " repl m!
 connh:
 ^pend@ ^f!
 8192 malloc b!
-^f@ b@ 8000 0 call recv n!
+^f@ b@ 8000 0 _call recv n!
 n@ 0 lt 'nfail 'padcheck ifelse          ; n<0 -> recv error; n>=0 -> process
 0 ret
 
@@ -142,7 +142,7 @@ allread:
 
 ; need more data — recv again
 needmore:
-  ^f@ b@ n@ + 8000 n@ - 0 call recv got!
+  ^f@ b@ n@ + 8000 n@ - 0 _call recv got!
   got@ 1 lt 'allread 'havemore ifelse    ; got<=0 -> closed; got>=1 -> append
   0 ret
 
@@ -150,7 +150,7 @@ havemore:
   n@ got@ + n!
   1 reread! 0 ret
 
-closefd: ^f@ 3 sys 1 drop 0 ret
+closefd: ^f@ 3 _sys 1 drop 0 ret
 
 ; ---- routing ----
 
@@ -165,16 +165,16 @@ meth@ "POST" eq path@ "/send"  eq and 'ssd if
 ^done@ not 'r404 if
 0 ret                                 ; `try` body contract: one value
 
-sev: ^f@ ^evh@ call snd
+sev: ^f@ ^evh@ _call snd
      ^ev@ list 0 push ^f@ push enq      ; register fd with broker (fd stays open)
      1 ^done! 0 ret
 
-spg: ^f@ ^presp@ call snd ^f@ 3 sys 1 drop 1 ^done! 0 ret
+spg: ^f@ ^presp@ _call snd ^f@ 3 _sys 1 drop 1 ^done! 0 ret
 
 ssd: 'dopar try drop drop
-     ^f@ ^okr@ call snd ^f@ 3 sys 1 drop 1 ^done! 0 ret
+     ^f@ ^okr@ _call snd ^f@ 3 _sys 1 drop 1 ^done! 0 ret
 
-r404: ^f@ ^nfr@ call snd ^f@ 3 sys 1 drop 1 ^done! 0 ret
+r404: ^f@ ^nfr@ _call snd ^f@ 3 _sys 1 drop 1 ^done! 0 ret
 
 ; ---- broker: sole owner of cl (client fds) and hist (frames) ----------
 
@@ -196,15 +196,15 @@ e@ 1 get f2!
 ^hist@ len 'brep for
 0 ret
 
-brep: i! ^hist@ i@ get call str2raw tmp!
-      f2@ tmp@ call snd
+brep: i! ^hist@ i@ get _call str2raw tmp!
+      f2@ tmp@ _call snd
       tmp@ free ret
 
 bmsg:                                  ; e = [1 msg]: frame, store, fan out
 "data: " e@ 1 get cat "\n\n" cat fr!
 ^hist@ fr@ push ^hist!
 ^hist@ len 100 gt 'hcap if
-fr@ call str2raw frr!
+fr@ _call str2raw frr!
 list cl2!                              ; start fresh live-client list
 ^cl@ len 'bc for                        ; fan out to all registered clients
 cl2@ ^cl!                               ; replace cl with the live-client list
@@ -212,21 +212,21 @@ frr@ free
 0 ret
 
 bc: i! ^cl@ i@ get bf!
-    bf@ frr@ frr@ call strlen 0 call send 0 lt 'bdead 'balive ifelse
+    bf@ frr@ frr@ _call strlen 0 _call send 0 lt 'bdead 'balive ifelse
     ret
 
 balive: cl2@ bf@ push cl2! 0 ret       ; client still alive: keep in new list
-bdead:  bf@ 3 sys 1 drop 0 ret         ; send failed: close fd, drop client
+bdead:  bf@ 3 _sys 1 drop 0 ret         ; send failed: close fd, drop client
 hcap:   ^hist@ ^hist@ len 100 - ^hist@ len slice ^hist! 0 ret
 
 ; ---- startup ----------------------------------------------------------
 
 parg: argv 1 get atoi port! 0 ret
 
-bfail: "bind failed — port already in use?\n" print drop 1 call exit 0 ret
+bfail: "bind failed — port already in use?\n" print drop 1 _call exit 0 ret
 
 entry:
-1 9 call prctl drop                   ; PR_SET_PDEATHSIG(1)=9(SIGKILL): die if parent exits
+1 9 _call prctl drop                   ; PR_SET_PDEATHSIG(1)=9(SIGKILL): die if parent exits
 8080 port!
 argv len 1 gt 'parg if
 
@@ -235,20 +235,20 @@ argv len 1 gt 'parg if
 
 ; precomputed responses (built once, converted to raw C strings once)
 page@ len "%d" fmt plen!
-"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: " plen@ cat "\r\nConnection: close\r\n\r\n" cat page@ cat call str2raw ^presp!
-"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok" call str2raw ^okr!
-"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" call str2raw ^nfr!
-"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n: hi\n\n" call str2raw ^evh!
+"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: " plen@ cat "\r\nConnection: close\r\n\r\n" cat page@ cat _call str2raw ^presp!
+"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok" _call str2raw ^okr!
+"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" _call str2raw ^nfr!
+"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n: hi\n\n" _call str2raw ^evh!
 
 ; listener socket: AF_INET=2 SOCK_STREAM=1, SO_REUSEADDR, INADDR_ANY
-2 1 0 call socket lfd!
+2 1 0 _call socket lfd!
 8 malloc opt! 1 opt@ storex
-lfd@ 1 2 opt@ 4 call setsockopt drop  ; SOL_SOCKET=1 SO_REUSEADDR=2
+lfd@ 1 2 opt@ 4 _call setsockopt drop  ; SOL_SOCKET=1 SO_REUSEADDR=2
 16 malloc sa!
 port@ 256 div 16 shl port@ 256 rem 24 shl or 2 or sa@ storex
 0 sa@ 8 + storex                      ; sin_addr=INADDR_ANY, zero pad
-lfd@ sa@ 16 call bind 0 lt 'bfail if
-lfd@ 64 call listen drop
+lfd@ sa@ 16 _call bind 0 lt 'bfail if
+lfd@ 64 _call listen drop
 
 port@ "uflux chat on :%d — open it in two browser tabs\n" print drop
 
@@ -262,7 +262,7 @@ list ^cl! list ^hist!                   ; broker-owned state
 0 ret
 acond: 1 ret
 abody:
-lfd@ 0 0 call accept ^pend!
+lfd@ 0 0 _call accept ^pend!
 'connh spawn drop
 ^hs@ deq drop                          ; wait until handler is done
 0 ret

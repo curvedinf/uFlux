@@ -44,7 +44,7 @@ Runtime flags: `--gc-threshold N`, `--gc-off`, `--mt`.
 
 All opcode semantics, control flow, variable scoping (`x!`/`x@` locals, `^x!`/`^x@` globals), structured concurrency (`spawn`/`chan`/`weave`), container protocol, string escapes, module system (`USE`/`import`/`extern`/`MOD`/`PUB`), and directory mode are in **`SPEC.md`**. Opcode→glyph/mnemonic tables are in `comp/src/lex.rs` (`OP_NAMES`, `OP_GLYPHS`, `text_mnemonic`).
 
-Key gotchas not to re-derive: raw jumps (`jmp`/`jz`/`je`) are removed — compile errors. String escapes limited to `\n \t \r \0 \\ \"`. Linking is always `-lpthread -lm` plus `-l<name>` per `USE`.
+Key gotchas not to re-derive: raw jumps (`jmp`/`jz`/`je`) are removed — compile errors. String escapes limited to `\n \t \r \0 \\ \"`. Linking is always `-lpthread -lm` plus `-l<name>` per `USE`. Immediate-operand opcodes (`_call`, `_addr`, `_sys`, `_lit`, `_str`, `_sizeof`, `_offset`, `_obj`, `_cast`, `_arr`, `_tensor`) are `_`-prefixed in text mode — they consume the next source token at compile time. Identifiers may not start with `_`.
 
 ## Development Notes
 

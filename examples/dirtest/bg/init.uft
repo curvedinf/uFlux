@@ -5,7 +5,7 @@
 "bg exiting\n" print drop
 ret
 
-; publish the channel handle so main.uft can call bg_chan to get it
+; publish the channel handle so main.uft can _call bg_chan to get it
 pub bg_chan:
   ^cq@ ret
 

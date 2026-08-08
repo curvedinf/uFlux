@@ -22,5 +22,5 @@ ret
 even: 2 rem 0 eq ret
 big: 5 gt ret
 pmod: 3 rem ret
-gsum: lst! lst@ len n! n@ arr int a! n@ 'cp for a@ vsum ret
+gsum: lst! lst@ len n! n@ _arr int a! n@ 'cp for a@ vsum ret
 cp: k! lst@ k@ get a@ swp k@ swp set ret

@@ -17,7 +17,7 @@ ij:
 se:
   ^C@ swp get ^sum@ + ^sum! ret
 entry:
-  16384 arr int ^A! 16384 arr int ^B! 16384 arr int ^C!
+  16384 _arr int ^A! 16384 _arr int ^B! 16384 _arr int ^C!
   128 'fi for
   128 'cr for
   0 ^sum!

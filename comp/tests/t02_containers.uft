@@ -23,7 +23,7 @@ l@ 1 get "%d\n" print
 "hello" len "%d\n" print
 "foobar" 1 2 getq "%d\n" print
 struct P { x:int, y:int }
-obj P p!
+_obj P p!
 p@ "x" 42 set
 p@ "x" get "%d\n" print
 p@ "y" getq "%d\n" print

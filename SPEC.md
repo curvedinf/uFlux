@@ -162,7 +162,7 @@ dense glyph; the text mnemonic is the lowercased name. Glyph assignments are
 
 | idx | | mn | stack | notes |
 |----|---|----|----|-------|
-| 0 | 🌀 | `lit` | → v | immediate follows (number/type glyph/keyword) |
+| 0 | 🌀 | `_lit` | → v | immediate follows (number/type glyph/keyword) |
 | 1 | 😀 | `dup` | a → a a | |
 | 2 | 🚀 | `ovr` | a b → a b a | |
 | 3 | 🤍 | `drop` | a → | |
@@ -176,32 +176,32 @@ dense glyph; the text mnemonic is the lowercased name. Glyph assignments are
 | 11 | 🤑 | `inc` | a → a+1 | |
 | 12 | 🌃 | `dec` | a → a−1 | |
 | 16 | 😃 | `for` | count addr → | pushes k per iteration |
-| 17 | 🚄 | `call` | (label operand) | |
+| 17 | 🚄 | `_call` | (label operand) | |
 | 18 | 🤒 | `ret` | → | |
-| 19 | 🌄 | `obj` | → h | type immediate (struct id) |
+| 19 | 🌄 | `_obj` | → h | type immediate (struct id) |
 | 20 | 😄 | `get` | h k → v | polymorphic (protocol above) |
 | 21 | 🚅 | `set` | h k v → | polymorphic |
-| 23 | 🤓 | `arr` | len → h | type immediate; 64-aligned typed array |
+| 23 | 🤓 | `_arr` | len → h | type immediate; 64-aligned typed array |
 | 26 | 🌅 | `clone` | h → h' | deep copy |
-| 27 | 😅 | `cast` | h type → h | checked downcast (struct id); dies on mismatch |
+| 27 | 😅 | `_cast` | h type → h | checked downcast (struct id); dies on mismatch |
 | 28 | 🚆 | `macro` | (directive) | `macro name { body }` |
-| 29 | 🤔 | `tensor` | len → h | type immediate |
+| 29 | 🤔 | `_tensor` | len → h | type immediate |
 | 33 | 🌆 | `setv` | value → | `<v>!` local, `^<v>!` global (v11) |
 | 34 | 😆 | `getv` | → value | `<v>@` local, `^<v>@` global (v11) |
-| 35 | 🚇 | `str` | → h | bare `"…"` preferred |
+| 35 | 🚇 | `_str` | → h | bare `"…"` preferred |
 | 36 | 🤕 | `cat` | a b → h | tag-dispatched: str/arr/list concat |
 | 37 | 🌇 | `fmt` | args… fmt → h | |
 | 38 | 😇 | `buf` | size → ptr | raw (untracked) buffer |
 | 40 | 🚉 | `bufcopy` | dst src n → | |
-| 41 | 🤖 | `addr` | → code address | `'label` |
+| 41 | 🤖 | `_addr` | → code address | `'label` |
 | 42 | 🌈 | `loadx` | addr → value | raw memory read |
 | 43 | 😈 | `storex` | value addr → | raw memory write |
-| 44 | 🚊 | `sizeof` | type → n | |
-| 45 | 🤗 | `offset` | → n | compile-time `Struct.field` |
+| 44 | 🚊 | `_sizeof` | type → n | |
+| 45 | 🤗 | `_offset` | → n | compile-time `Struct.field` |
 | 46 | 🌉 | `struct` | (directive) | `struct Name { field:type, … }` |
 | 47 | 😉 | `malloc` | size → ptr | raw (untracked) |
 | 48 | 🚌 | `free` | ptr → | raw only — never on GC handles |
-| 49 | 🤘 | `sys` | args… num → ret | syscall by number |
+| 49 | 🤘 | `_sys` | args… num → ret | syscall by number |
 | 50 | 🌊 | `gc` | → | forces a full mark-sweep collection |
 | 51 | 😊 | `import` | (directive) | `import c"fn"(types)->ret` |
 | 52 | 🚍 | `export` | (directive) | `export "name"` before a label |
@@ -590,7 +590,7 @@ Lowercase ASCII mnemonics, whitespace-delimited. Same Tok AST as dense.
 
 - Tokens split on whitespace; `;` comments; `"..."` strings may contain spaces.
   `-` alone is SUB, `-5` is a number (no lookback rule).
-- Bare decimal/hex/float literals self-evaluate; `lit` stays for type ids.
+- Bare decimal/hex/float literals self-evaluate; `_lit` stays for type ids.
 - Names: label def `name:`, refs `'name`, variables `name!`/`name@` (any
   identifier). Opcode mnemonics are reserved words.
 - `--emit-text` / `--emit-dense` round-trip between encodings. `--to-text` /
@@ -615,11 +615,13 @@ program      := token*
 token        := number | string | varset | varget | labeldef | jump | op | directive
 number       := ['-'] lrun ['.' lrun] ['e' ['-'] lrun]
 string       := '"' ... '"'
+name         := [a-zA-Z][a-zA-Z0-9_]*    ; must NOT start with '_' (reserved for _-prefixed ops)
 varset       := ['^'] name ('!' | setv-glyph)
 varget       := ['^'] name ('@' | getv-glyph)
 labeldef     := name (':')?
-jump         := (call-glyph | "'") name
+jump         := (_call | "'") name
 op           := opcode-glyph | '+' | '-' | '*' | '&'
+             ; text mode: immediate-operand ops are _-prefixed — see section below
 directive    := import c"name"(params)->ret | export "name" | extern "sym"
              | macro name { token* } | struct name { field:type, … }
              | use "name" | mod "name" | pub <labeldef>
@@ -632,6 +634,40 @@ vmap/vfold, imap/ifilter, feach/ffold, bfs/dfs/wfind, spawn, group/agg, fanout
 bodies) take label addresses on the stack — written `'<label>` — resolved by
 the compiler. `break`/`cont` valid only inside a lexically enclosing
 `while`/`for` body in the same function (compile error otherwise).
+
+## Immediate-operand opcodes (_-prefixed, text mode only)
+
+Opcodes starting with `_` take a **compile-time immediate**: the next source
+token is consumed as a label name, type name, or numeric operand at compile
+time. The immediate operand never touches the runtime stack — the value it
+denotes is baked into the generated code or resolved to an address by the
+compiler.
+
+All other opcodes operate purely on the runtime stack.
+
+This makes the distinction visible at a glance: `_call foo` consumes the
+token `foo` as a label reference, whereas `+`, `dup`, `swap` read their
+inputs from the stack at run time.
+
+User-defined identifiers (variables, labels) may **not** start with `_` —
+the prefix is reserved for these opcodes.
+
+Dense/glyph mode is unaffected: glyphs dispatch by codepoint, not by name,
+so no prefix is needed (or possible) there.
+
+| mnemonic | opcode | immediate operand | stack effect |
+|----------|--------|-------------------|--------------|
+| `_lit` | LIT | number / type glyph / type keyword | → v |
+| `_call` | CALL | label name | call (see notes) |
+| `_addr` | ADDR | label name (`'label`) | → code address |
+| `_sys` | SYS | syscall number | args… num → ret |
+| `_str` | STR | string literal | → h |
+| `_sizeof` | SIZEOF | type name | type → n |
+| `_offset` | OFFSET | `Struct.field` | → n |
+| `_obj` | OBJ | type name (struct id) | → h |
+| `_cast` | CAST | type name (struct id) | h type → h |
+| `_arr` | ARR | type name | len → h |
+| `_tensor` | TENSOR | type name | len → h |
 
 ## Codegen notes
 

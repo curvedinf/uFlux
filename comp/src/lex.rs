@@ -740,6 +740,9 @@ impl Lexer {
             }
             if c.is_ascii_alphabetic() || c == '_' {
                 let name = self.lex_ident();
+                if is_bad_ident(&name) {
+                    self.err(&format!("identifier '{}' — identifiers may not start with '_'", name));
+                }
                 if self.peek() == Some(':') {
                     self.pos += 1;
                     out.push(Tok::LabelDef(name));
@@ -997,6 +1000,9 @@ impl Lexer {
             "MACRO" => {
                 self.skip_ws();
                 let mname = self.lex_ident();
+                if is_bad_ident(&mname) {
+                    self.err(&format!("macro name '{}' — identifiers may not start with '_'", mname));
+                }
                 self.skip_ws();
                 if self.next() != Some('{') {
                     self.err("MACRO: expected '{'");
@@ -1008,6 +1014,9 @@ impl Lexer {
             "STRUCT" => {
                 self.skip_ws();
                 let sname = self.lex_ident();
+                if is_bad_ident(&sname) {
+                    self.err(&format!("struct name '{}' — identifiers may not start with '_'", sname));
+                }
                 self.skip_ws();
                 if self.next() != Some('{') {
                     self.err("STRUCT: expected '{'");
@@ -1051,6 +1060,9 @@ impl Lexer {
                     }
                     if c.is_ascii_alphabetic() {
                         let sym = self.lex_ident();
+                        if is_bad_ident(&sym) {
+                            self.err(&format!("sizeof: '{}' — identifiers may not start with '_'", sym));
+                        }
                         out.push(Tok::Ident(format!("@sizeof:{}", sym)));
                         return;
                     }
@@ -1060,6 +1072,9 @@ impl Lexer {
             "OFFSET" => {
                 self.skip_ws();
                 let sym = self.lex_ident();
+                if is_bad_ident(&sym) {
+                    self.err(&format!("offset: '{}' — identifiers may not start with '_'", sym));
+                }
                 if self.peek() == Some('.') {
                     self.pos += 1;
                     let field = self.lex_ident();
@@ -1089,6 +1104,9 @@ impl Lexer {
                     }
                     if c.is_ascii_alphabetic() {
                         let kw = self.lex_ident();
+                        if is_bad_ident(&kw) {
+                            self.err(&format!("{}: type name '{}' — identifiers may not start with '_'", name, kw));
+                        }
                         if let Some(id) = type_id(&kw) {
                             out.push(Tok::PushI(id));
                             if needs_swp {
@@ -1642,7 +1660,7 @@ impl TextLexer {
                             }
                             out.push(Tok::Op(name));
                         }
-                        Some(t) if !is_reserved(t) && !t.ends_with(':') && !t.ends_with('!') && !t.ends_with('@') && parse_text_num(t).is_none() && unquote(t).is_none() && !t.starts_with('\'') => {
+                        Some(t) if !is_reserved(t) && !is_bad_ident(t) && !t.ends_with(':') && !t.ends_with('!') && !t.ends_with('@') && parse_text_num(t).is_none() && unquote(t).is_none() && !t.starts_with('\'') => {
                             let kw = self.next().unwrap();
                             if name == "OBJ" {
                                 out.push(Tok::Ident(format!("@objsize:{}", kw)));

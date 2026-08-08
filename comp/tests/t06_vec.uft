@@ -1,6 +1,6 @@
-; build arr [0..9]
+; build _arr [0..9]
 0 10 range lst!
-lst@ len arr int a!
+lst@ len _arr int a!
 lst@ len 'cp for
 a@ 2 vadd vsum "%d\n" print drop
 a@ vsum "%d\n" print drop
@@ -19,13 +19,13 @@ a@ 4 vgt a@ 7 vlt vor vcount "%d\n" print drop
 a@ 'sq vmap vsum "%d\n" print drop
 a@ 0 'acc vfold "%d\n" print drop
 ; float arr
-lst@ len arr float f!
+lst@ len _arr float f!
 lst@ len 'cp2 for
 f@ 0.5 vadd vsum "%f\n" print drop
 f@ vmean "%f\n" print drop
 ; vargsort / vsearchsorted / vwhere
 list 30 push 10 push 20 push s3!
-s3@ len arr int b!
+s3@ len _arr int b!
 s3@ len 'cp3 for
 b@ vargsort idx!
 idx@ 0 get "%d\n" print drop

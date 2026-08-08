@@ -11,7 +11,7 @@ it@ next "%d %d\n" print drop
 ; dict iter yields keys
 dict d! d@ "k1" 1 set d@ "k2" 2 set
 d@ iter collect len "%d\n" print drop
-; str iter yields bytes
+; _str iter yields bytes
 "AB" iter collect 1 get "%d\n" print drop
 ; json / unjson
 "{\"a\": 1, \"b\": [1, 2, 3], \"s\": \"hi\"}" json j!

@@ -15,7 +15,7 @@
 "\n" print drop
 "done\n" print drop
 ret
-; --- quotation bodies (all continuations of the top-level call body) ---
+; --- quotation bodies (all continuations of the top-level _call body) ---
 yes: "YES\n" print ret
 then: "THEN\n" print ret
 els: "ELS\n" print ret
