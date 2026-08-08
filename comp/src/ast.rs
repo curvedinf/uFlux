@@ -19,6 +19,10 @@ pub enum Tok {
     GetV(String),                 // ^x@ — global fetch (v11)
     LocalSet(String),             // x!  — local store (v11)
     LocalGet(String),             // x@  — local fetch (v11)
+    IncLocal(String),             // x++ — local increment by 1
+    AddLocal(String),             // x+= — local accumulate from stack
+    IncGlobal(String),            // ^x++ — global increment by 1
+    AddGlobal(String),            // ^x+= — global accumulate from stack
     Import(Import),
     Export(String),
     Extern(String),
@@ -91,6 +95,7 @@ pub struct Parsed {
     pub init_pcs: Vec<usize>, // instruction offsets of init-TU entry points (auto-thread)
     pub entry_label: Option<String>, // label name of the ENTRY marker (jmp-from-pc0 target)
     pub local_counts: HashMap<usize, usize>, // v11: label pc -> frame size (local variable count)
+    pub local_names: HashMap<usize, Vec<String>>, // debug: body pc -> slot names ordered by slot id
 }
 
 // struct layouts: field name -> offset, total size, struct id. Shared across

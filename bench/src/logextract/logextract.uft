@@ -12,25 +12,15 @@ proc:
 ^tb@ by@ + ^tb!
 ^tl@ 1 + ^tl!
 0 ret
-toppick:
-drop
--1 bestv! "" bestk!
-iplist@ len 'scanip for
+emitip:
+idx!
+ipairs@ idx@ get pair!
+pair@ 0 get ipk!
+pair@ 1 get ipcnt!
 rank@ 1 + rank!
-rank@ bestk@ ^sc@ bestk@ getq
+rank@ ipk@ ipcnt@
 "top_ip_%d: %s (%d)\n" print drop
-^sel@ bestk@ 1 addto
 ret
-scanip:
-k!
-iplist@ k@ get name!
-^sel@ name@ getq not 'schk if
-ret
-schk:
-^sc@ name@ getq v!
-v@ bestv@ gt 'supd if
-0 ret
-supd: v@ bestv! name@ bestk! 0 ret
 hpf:
 k!
 ^hrs@ k@ getq hv!
@@ -45,7 +35,7 @@ dict ^sc!
 dict ^hrs!
 dict ^sd!
 "bench/data/access.log" p!
-argv len 1 gt 'useargv if
+hasargs 'useargv if
 p@ " " 0 'fl fsplit drop
 "=== LOG EXTRACTION RESULTS ===\n" print drop
 ^tl@ "total_lines: %d\n" print
@@ -55,8 +45,6 @@ p@ " " 0 'fl fsplit drop
 ^sd@ 4 getq "status_4xx: %d\n" print drop
 ^sd@ 5 getq "status_5xx: %d\n" print drop
 24 'hpf for
-dict ^sel!
-^sc@ keys iplist!
-iplist@ sort iplist!
-10 'toppick for
+^sc@ 10 topn ipairs!
+ipairs@ len 'emitip for
 ret

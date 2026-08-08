@@ -5,7 +5,7 @@ PROJ=Path("/home/chase/Projects/uflux")
 BENCH=PROJ/"bench"
 DATA=BENCH/"data"
 RESULTS=BENCH/"results"
-UF=PROJ/"comp"/"target"/"debug"/"uf"
+UF=PROJ/"comp"/"target"/"release"/"uf"
 RESULTS.mkdir(exist_ok=True)
 from transformers import AutoTokenizer
 tok=AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
@@ -95,28 +95,49 @@ def run_benchmark(name,cmd,cwd=PROJ,timeout=120):
            "stdout":out[:500]if out else"","stderr":err[:200]if err else""}
 def main():
     print("=== Token Counting (Qwen3-0.6B tokenizer) ===\n")
+    # Generate dense .uf files from .uft for µFlux token counting
+    print("=== Generating dense .uf files ===\n")
+    bench_names=["logextract","analytics","mandelbrot","spectralnorm"]
+    uf_paths={}
+    for bn in bench_names:
+        uft=BENCH/"src"/bn/f"{bn}.uft"
+        uf_out=BENCH/"src"/bn/f"{bn}.uf"
+        rc,t,out,err=run_cmd([str(UF),"--to-dense",str(uft)])
+        if rc==0 and uf_out.exists():
+            uf_paths[bn]=uf_out
+            print(f"  {bn:14s}: generated ({t:.1f}s)")
+        else:
+            print(f"  {bn:14s}: FAILED ({err})")
+    print()
+
     sources={
         "Python":{
             "logextract":BENCH/"src"/"logextract"/"logextract.py",
             "analytics":BENCH/"src"/"analytics"/"analytics.py",
+            "mandelbrot":BENCH/"src"/"mandelbrot"/"mandelbrot.py",
+            "spectralnorm":BENCH/"src"/"spectralnorm"/"spectralnorm.py",
         },
         "Node.js":{
             "logextract":BENCH/"src"/"logextract"/"logextract.js",
             "analytics":BENCH/"src"/"analytics"/"analytics.js",
+            "mandelbrot":BENCH/"src"/"mandelbrot"/"mandelbrot.js",
+            "spectralnorm":BENCH/"src"/"spectralnorm"/"spectralnorm.js",
         },
         "C++":{
             "logextract":BENCH/"src"/"logextract"/"logextract.cpp",
             "analytics":BENCH/"src"/"analytics"/"analytics.cpp",
+            "mandelbrot":BENCH/"src"/"mandelbrot"/"mandelbrot.cpp",
+            "spectralnorm":BENCH/"src"/"spectralnorm"/"spectralnorm.cpp",
         },
         "Rust":{
             "logextract":BENCH/"src"/"logextract"/"logextract.rs",
             "analytics":BENCH/"src"/"analytics"/"analytics.rs",
+            "mandelbrot":BENCH/"src"/"mandelbrot"/"mandelbrot.rs",
+            "spectralnorm":BENCH/"src"/"spectralnorm"/"spectralnorm.rs",
         },
-        "µFlux":{
-            "logextract":BENCH/"src"/"logextract"/"logextract.uft",
-            "analytics":BENCH/"src"/"analytics"/"analytics.uft",
-        },
+        "µFlux":{bn:uf_paths[bn] for bn in bench_names if bn in uf_paths},
     }
+    print("=== Token Counting (Qwen3-0.6B tokenizer) ===\n")
     token_data={}
     for lang,files in sources.items():
         token_data[lang]={}
@@ -207,17 +228,11 @@ def main():
         print(f"{lang:<10} {le_s:>12} {an_s:>12} {mb_s:>12} {sn_s:>14}")
     print(f"\n{'Token counts':<10} {'LogExtract':>12} {'Analytics':>12} {'Mandelbrot':>12} {'SpectralNorm':>14}")
     print("-"*64)
-    sn_src=BENCH/"src"/"spectralnorm"/"spectralnorm.uft"
-    mb_src=BENCH/"src"/"mandelbrot"/"mandelbrot.uft"
     for lang in["µFlux","Rust","C++","Python","Node.js"]:
-        le_tok=token_data[lang]["logextract"]["tokens"]
-        an_tok=token_data[lang]["analytics"]["tokens"]
-        # mandelbrot/spectralnorm only have µFlux sources for token counting
-        if lang=="µFlux":
-            mb_tok,__=count_tokens(str(mb_src))
-            sn_tok,__=count_tokens(str(sn_src))
-            print(f"{lang:<10} {le_tok:>12} {an_tok:>12} {mb_tok:>12} {sn_tok:>14}")
-        else:
-            print(f"{lang:<10} {le_tok:>12} {an_tok:>12} {'—':>12} {'—':>14}")
+        vals=[]
+        for bn in["logextract","analytics","mandelbrot","spectralnorm"]:
+            t=token_data.get(lang,{}).get(bn,{}).get("tokens")
+            vals.append(f"{t:>12}" if t else f"{'—':>12}")
+        print(f"{lang:<10} {vals[0]} {vals[1]} {vals[2]} {vals[3]:>14}")
 if __name__=="__main__":
     main()

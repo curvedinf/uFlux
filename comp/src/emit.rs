@@ -39,6 +39,10 @@ pub fn emit_text(toks: &[Tok]) -> String {
             Tok::GetV(n) => o.push_str(&format!("^{}@ ", n)),
             Tok::LocalSet(n) => o.push_str(&format!("{}! ", n)),
             Tok::LocalGet(n) => o.push_str(&format!("{}@ ", n)),
+            Tok::IncLocal(n) => o.push_str(&format!("{}++ ", n)),
+            Tok::AddLocal(n) => o.push_str(&format!("{}+= ", n)),
+            Tok::IncGlobal(n) => o.push_str(&format!("^{}++ ", n)),
+            Tok::AddGlobal(n) => o.push_str(&format!("^{}+= ", n)),
             Tok::Import(im) => o.push_str(&format!("import c\"{}\"({})->{} ", im.name, im.params.join(","), im.ret)),
             Tok::Export(n) => o.push_str(&format!("export \"{}\" ", escape_str(n))),
             Tok::Extern(n) => o.push_str(&format!("extern \"{}\" ", escape_str(n))),
@@ -69,7 +73,6 @@ pub fn emit_text(toks: &[Tok]) -> String {
                 o.push_str(&format!("task {} {} endt\n  ", name, emit_text(body)));
             }
             Tok::TaskEnd(_) => {}
-            Tok::Entry => {}
             Tok::Wrun => {
                 o.push_str("wrun\n");
                 in_weave = false;
@@ -161,6 +164,10 @@ pub fn emit_dense(toks: &[Tok]) -> String {
                 Tok::GetV(n) => { sep_v(o); o.push_str(&format!("^{}@", nm(n, names, next))); }
                 Tok::LocalSet(n) => { sep_v(o); o.push_str(&format!("{}!", nm(n, names, next))); }
                 Tok::LocalGet(n) => { sep_v(o); o.push_str(&format!("{}@", nm(n, names, next))); }
+                Tok::IncLocal(n) => { sep_v(o); o.push_str(&format!("{}++", nm(n, names, next))); }
+                Tok::AddLocal(n) => { sep_v(o); o.push_str(&format!("{}+=", nm(n, names, next))); }
+                Tok::IncGlobal(n) => { sep_v(o); o.push_str(&format!("^{}++", nm(n, names, next))); }
+                Tok::AddGlobal(n) => { sep_v(o); o.push_str(&format!("^{}+=", nm(n, names, next))); }
                 Tok::Import(im) => o.push_str(&format!("{}c\"{}\"({})->{}", glyph_of(51), im.name, im.params.join(","), im.ret)),
                 Tok::Export(n) => o.push_str(&format!("{}\"{}\"", glyph_of(52), escape_str(n))),
                 Tok::Extern(n) => o.push_str(&format!("{}\"{}\"", glyph_of(53), escape_str(n))),
@@ -199,7 +206,6 @@ pub fn emit_dense(toks: &[Tok]) -> String {
                     o.push_str(&format!("{}\n", glyph_of(83)));
                 }
                 Tok::TaskEnd(_) => {}
-                Tok::Entry => {}
                 Tok::Wrun => {
                     o.push_str(&format!("{}\n", glyph_of(84)));
                     *weave = false;

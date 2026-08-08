@@ -9,7 +9,7 @@ pub const TYPE_BASE: u32 = 0x13110;
 
 // Opcode glyphs (187 live ops). Index = OP_NAMES array position.
 // All colored emoji (U+1F300+), each exactly one Qwen3 token.
-pub const OP_GLYPHS: [u32; 207] = [
+pub const OP_GLYPHS: [u32; 212] = [
     0x1F300, 0x1F600, 0x1F680, 0x1F90D, 0x1F301, 0x1F601, 0x1F682, 0x1F910,
     0x1F302, 0x1F602, 0x1F683, 0x1F911, 0x1F303, 0x0, 0x0, 0x0,
     0x1F603, 0x1F684, 0x1F912, 0x1F304, 0x1F604, 0x1F685, 0x0, 0x1F913,
@@ -36,6 +36,8 @@ pub const OP_GLYPHS: [u32; 207] = [
     0x1F32F, 0x1F629, 0x1F6C0, 0x1F938, 0x1F330, 0x1F62A, 0x1F6C1, 0x1F939,
     0x1F331, 0x1F62B, 0x1F6CB, 0x1F93D, 0x1F332, 0x1F62C, 0x1F6CC, 0x1F93E,
     0x1F333, 0x1F62D, 0x1F6CD, 0x1F940, 0x1F334, 0x1F62E, 0x1F6CE,
+    0x1F95B, 0x1F95C, 0x1F95D, 0x1F95E,
+    0x1F958,
 ];
 
 // v-space: base-64 digits for variable/label name atoms (colored emoji).
@@ -112,7 +114,7 @@ pub fn glyph_type_id(c: char) -> Option<i64> {
 // 196 opcode slots (0..=195). Retired indices use "~NN" placeholders: they
 // have no glyph, no text mnemonic, and no runtime helper — any use is a
 // compile error (unassigned glyph / unknown identifier).
-pub const OP_NAMES: [&str; 207] = [
+pub const OP_NAMES: [&str; 212] = [
     "LIT", "DUP", "OVR", "DRP", "SWP", "PICK", "ADD", "SUB", "MUL", "AND", "SHR", "INC", "DEC",
     "~13", "~14", "~15", "FOR", "CALL", "RET", "OBJ", "GET", "SET", "~22", "ARR", "~24", "~25",
     "CLONE", "CAST", "MACRO", "TENSOR", "~30", "~31", "~32", "SETV", "GETV", "STR", "CAT", "FMT",
@@ -149,10 +151,210 @@ pub const OP_NAMES: [&str; 207] = [
     "TRY", "RETRY", "SPAWN", "VEMIN",
     "ATOI", "ATOF", "ITOA", "FTOA",
     "ENTRY",
+    "HASARGS", "ARGI", "SORTKEYS", "TOPN",
+    "RANGEFOLD",
 ];
 
 pub fn op_index(name: &str) -> Option<usize> {
     OP_NAMES.iter().position(|n| *n == name)
+}
+
+/// Short usage description for each live opcode, keyed by name.
+pub fn op_usage(name: &str) -> &'static str {
+    match name {
+        "LIT" => "→ v | immediate follows",
+        "DUP" => "a → a a",
+        "OVR" => "a b → a b a",
+        "DRP" => "a →",
+        "SWP" => "a b → b a",
+        "PICK" => "… n → elem | copy nth-from-top",
+        "ADD" => "a b → a+b",
+        "SUB" => "a b → a-b",
+        "MUL" => "a b → a*b",
+        "AND" => "a b → a&b",
+        "SHR" => "a → a>>1",
+        "INC" => "a → a+1",
+        "DEC" => "a → a-1",
+        "FOR" => "count body_addr → | pushes index k per iter",
+        "CALL" => "(label operand) | call subroutine",
+        "RET" => "→ | return from call",
+        "OBJ" => "→ h | type immediate (struct id)",
+        "GET" => "h k → v | polymorphic container get",
+        "SET" => "h k v → | polymorphic container set",
+        "ARR" => "type len → h | type: int=0 float=1 ptr=2 byte=3",
+        "CLONE" => "h → h' | deep copy",
+        "CAST" => "h type → h | checked downcast",
+        "MACRO" => "(directive) | macro name { body }",
+        "TENSOR" => "type len → h",
+        "SETV" => "value → | x!/^x! store local/global",
+        "GETV" => "→ value | x@/^x@ fetch local/global",
+        "STR" => "→ h | push string",
+        "CAT" => "a b → h | concat (str/arr/list)",
+        "FMT" => "args… fmt → h | format string",
+        "BUF" => "size → ptr | raw untracked buffer",
+        "BUFCOPY" => "dst src n → | memory copy",
+        "ADDR" => "→ code address | 'label",
+        "LOADX" => "addr → value | raw memory read",
+        "STOREX" => "value addr → | raw memory write",
+        "SIZEOF" => "type → n",
+        "OFFSET" => "→ n | compile-time Struct.field",
+        "STRUCT" => "(directive) | struct Name { field:type … }",
+        "MALLOC" => "size → ptr | raw untracked",
+        "FREE" => "ptr → | raw only, never GC handles",
+        "SYS" => "args… num → ret | syscall by number",
+        "GC" => "→ | force full mark-sweep",
+        "IMPORT" => "(directive) | import c\"fn\"(types)->ret",
+        "EXPORT" => "(directive) | export \"name\" before label",
+        "EXTERN" => "→ address | extern \"symbol\"",
+        "PRINT" => "args… fmt → n | printf; n = chars written",
+        "SCAN" => "fmt → values… count | fscanf",
+        "DICT" => "→ h | empty hash map",
+        "LIST" => "→ h | empty growable list",
+        "PUSH" => "h v → h' | append to list",
+        "POP" => "h → v | pop from list",
+        "CHAN" => "cap → h | bounded MPSC ring",
+        "ENQ" => "h v → | enqueue (blocks if full)",
+        "DEQ" => "h → v | dequeue (blocks if empty)",
+        "CLOSE" => "h → | close channel",
+        "ATOM" => "v → h | atomic i64 cell",
+        "AGET" => "h → v | atomic load",
+        "ASET" => "h v → | atomic store",
+        "AADD" => "h n → old | atomic fetch-add",
+        "CAS" => "h old new → 0/1 | compare-and-swap",
+        "TYPEOF" => "h → tag | runtime type tag",
+        "LEN" => "h → n | generalized length",
+        "USE" => "(directive) | use \"name\" link + manifest",
+        "MOD" => "(directive) | mod \"name\" TU name",
+        "PUB" => "(directive) | export next label globally",
+        "WEAVE" => "(directive) | begin task scope",
+        "TASK" => "(directive) | begin task body",
+        "ENDT" => "(directive) | end task body",
+        "WRUN" => "(directive) | schedule DAG, wait, publish",
+        "SH" => "cmd → stdout stderr status | /bin/sh -c",
+        "SHP" => "cmd → chan | stream stdout line-by-line",
+        "EXEC" => "list → status | no shell, argv list",
+        "MATCH" => "str pat → list found | regex, group strings",
+        "REPLACE" => "str pat repl → str' | regex replace all",
+        "RSPLIT" => "str pat → list | regex split",
+        "GLOB" => "str pat → 0/1 | fnmatch-style",
+        "SPLIT" => "str sep → list | literal separator",
+        "JOIN" => "list sep → str",
+        "SLICE" => "seq a b → seq' | Python slice",
+        "FIND" => "str sub → idx | -1 on miss",
+        "REPL" => "str old new → str' | literal replace all",
+        "TRIM" => "str → str' | strip whitespace",
+        "UP" => "str → str' | ASCII uppercase",
+        "DOWN" => "str → str' | ASCII lowercase",
+        "STARTS" => "str affix → 0/1",
+        "ENDS" => "str affix → 0/1",
+        "DIV" => "a b → a/b | int truncates; b=0 dies",
+        "REM" => "a b → a%b | C remainder; b=0 dies",
+        "EQ" => "a b → 0/1 | numeric or string",
+        "LT" => "a b → 0/1 | numeric or lexicographic",
+        "GT" => "a b → 0/1",
+        "NOT" => "a → 0/1 | 1 if a==0",
+        "OR" => "a b → a|b | ints only",
+        "XOR" => "a b → a^b | ints only",
+        "SHL" => "a b → a<<b | ints only",
+        "BNOT" => "a → ~a | ints only",
+        "IF" => "cond body_addr → | call body if cond nonzero",
+        "IFELSE" => "cond then_addr else_addr →",
+        "WHILE" => "cond_addr body_addr → | loop until cond=0",
+        "BREAK" => "→ | exit nearest loop",
+        "CONT" => "→ | next iteration of nearest loop",
+        "GETQ" => "h k → v_or_0 | never dies on absence",
+        "HAS" => "h k → 0/1 | membership",
+        "ORELSE" => "a b → c | a if truthy else b",
+        "KEYS" => "h → list | dict keys or obj fields",
+        "RANGE" => "start stop → list | ints [start, stop)",
+        "SORT" => "seq → seq' | stable sort",
+        "FILTER" => "list pred_addr → list' | keep where pred truthy",
+        "SOME" => "list pred_addr → 0/1 | any element passes",
+        "EVERY" => "list pred_addr → 0/1 | all elements pass",
+        "VADD" => "arr scalar → arr'",
+        "VSUB" => "arr scalar → arr'",
+        "VMUL" => "arr scalar → arr'",
+        "VDIV" => "arr scalar → arr' | scalar 0 dies",
+        "VEADD" => "arr arr → arr' | elementwise add",
+        "VESUB" => "arr arr → arr'",
+        "VEMUL" => "arr arr → arr'",
+        "VEDIV" => "arr arr → arr' | any 0 divisor dies",
+        "VEMAX" => "arr arr → arr' | elementwise max",
+        "VEQ" => "arr scalar → bitmap",
+        "VLT" => "arr scalar → bitmap",
+        "VGT" => "arr scalar → bitmap",
+        "VGE" => "arr scalar → bitmap",
+        "VLE" => "arr scalar → bitmap",
+        "VAND" => "bm bm → bm' | bitmap and",
+        "VOR" => "bm bm → bm' | bitmap or",
+        "VNOT" => "bm → bm' | bitmap not",
+        "VCOUNT" => "bm → n | popcount",
+        "VGATHER" => "arr bm → arr' | keep set-bit elements",
+        "VSUM" => "arr → scalar | empty → 0",
+        "VMEAN" => "arr → f64 | empty dies",
+        "VMIN" => "arr → scalar | empty dies",
+        "VMAX" => "arr → scalar | empty dies",
+        "DEL" => "h k → | remove (dict: tombstone)",
+        "VMAP" => "arr fn_addr → arr' | elementwise fn",
+        "VFOLD" => "arr init fn_addr → acc | reduction",
+        "NOW" => "→ t | CLOCK_REALTIME nanos",
+        "TIME" => "str fmt → t | \"unix\" or strptime",
+        "TIMEF" => "t fmt → str | \"unix\" or strftime",
+        "BLOOM" => "n → h | bloom filter",
+        "BADD" => "h v → | add to bloom",
+        "BTEST" => "h v → 0/1 | 1=maybe, 0=definitely not",
+        "SLURP" => "path → str | whole file",
+        "SPIT" => "path str → | create/truncate",
+        "ARGV" => "→ list | program argv as strings",
+        "GROUP" => "list fn_addr → dict | group by key fn",
+        "AGG" => "dict fn_addr → dict' | aggregate groups",
+        "UNIQUE" => "list → list' | dedup, first-occurrence order",
+        "FLAT" => "list → list' | flatten one level",
+        "CHUNK" => "seq size → list | split into pieces",
+        "VARGSORT" => "arr → idx_arr | indices that sort",
+        "VSEARCHSORTED" => "sorted_arr val → idx | binary search",
+        "VWHERE" => "arr arr bm → arr' | blend by bitmap",
+        "MMAP" => "path → str | read-only zero-copy",
+        "FEACH" => "path fn_addr → | call fn per line, early stop",
+        "FFOLD" => "path init fn_addr → acc | streaming reduce lines",
+        "FSPLIT" => "path sep init fn_addr → acc | streaming split",
+        "FGET" => "field_idx → str | zero-copy field view",
+        "FATOI" => "field_idx → int | parse field, no alloc",
+        "FATOF" => "field_idx → float | parse field, no alloc",
+        "FSGET" => "field_idx off len → str | field substring",
+        "FBYTE" => "field_idx off → int | single byte from field",
+        "FMATCH" => "path pat → chan | stream regex-matching lines",
+        "BFS" => "start fn_addr → list | breadth-first visit",
+        "DFS" => "start fn_addr → list | depth-first pre-order",
+        "WFIND" => "start fn_addr pred_addr → v_or_0 | BFS early exit",
+        "VGET" => "h idx → v | direct typed array read",
+        "VSET" => "h idx v → | direct typed array write",
+        "ADDTO" => "dict key amount → | dict[key] += amount",
+        "FADDTO" => "dict field_idx amount → | dict[field] += amount",
+        "FCOUNT" => "path → count | count lines in file",
+        "JSON" => "str → v | parse JSON",
+        "UNJSON" => "v → str | serialize JSON",
+        "ITER" => "h → it | create cursor",
+        "NEXT" => "it → v more | more=0 exhausted",
+        "COLLECT" => "it → list | drain iterator",
+        "IMAP" => "it fn_addr → it' | lazy map",
+        "IFILTER" => "it pred_addr → it' | lazy filter",
+        "FEMIT" => "path it → n | stream iterable to file",
+        "TRY" => "body_addr → result ok | catch die",
+        "RETRY" => "n body_addr → result ok | try n+1 times",
+        "SPAWN" => "body_addr → chan | detached thread",
+        "VEMIN" => "arr arr → arr' | elementwise min",
+        "ATOI" => "str → int | strtoll base 10",
+        "ATOF" => "str → float | strtod",
+        "ITOA" => "int → str",
+        "FTOA" => "float → str",
+        "ENTRY" => "→ | marks program entry point",
+        "HASARGS" => "→ 0/1 | true if argv has >1 element",
+        "ARGI" => "idx → int | argv[idx] parsed as int",
+        "SORTKEYS" => "dict → key_list | keys + sort fused",
+        "TOPN" => "dict n → list | top-n [key value] pairs",
+        _ => "",
+    }
 }
 
 pub fn type_id(kw: &str) -> Option<i64> {
@@ -414,6 +616,9 @@ impl Lexer {
                 // ASCII ident after ^ (dense mode with ASCII names)
                 if c2.is_ascii_alphabetic() || c2 == '_' {
                     let name = self.lex_ident();
+                    if is_bad_ident(&name) {
+                        self.err(&format!("variable '{}' — identifiers may not start with '_'", name));
+                    }
                     self.skip_ws();
                     let g = self.peek();
                     if g == Some('!') || g.map_or(false, |c| opcode_index(c) == Some(33)) {
@@ -562,6 +767,9 @@ impl Lexer {
         let label = self.lex_ident();
         if label.is_empty() {
             self.err(&format!("{} needs a label", op));
+        }
+        if is_bad_ident(&label) {
+            self.err(&format!("{} label '{}' — identifiers may not start with '_'", op, label));
         }
         label
     }
@@ -932,16 +1140,16 @@ impl Lexer {
 // Retired slots return "~NN" which never matches a source token.
 pub fn text_mnemonic(idx: usize) -> &'static str {
     match OP_NAMES[idx] {
-        "LIT" => "lit", "DUP" => "dup", "OVR" => "ovr", "DRP" => "drop", "SWP" => "swp",
+        "LIT" => "_lit", "DUP" => "dup", "OVR" => "ovr", "DRP" => "drop", "SWP" => "swp",
         "PICK" => "pick", "ADD" => "add", "SUB" => "sub", "MUL" => "mul", "AND" => "and",
         "SHR" => "shr", "INC" => "inc", "DEC" => "dec",
-        "FOR" => "for", "CALL" => "call", "RET" => "ret", "OBJ" => "obj",
-        "GET" => "get", "SET" => "set", "ARR" => "arr", "CLONE" => "clone", "CAST" => "cast",
-        "MACRO" => "macro", "TENSOR" => "tensor", "SETV" => "setv", "GETV" => "getv",
-        "STR" => "str", "CAT" => "cat", "FMT" => "fmt", "BUF" => "buf", "BUFCOPY" => "bufcopy",
-        "ADDR" => "addr", "LOADX" => "loadx", "STOREX" => "storex", "SIZEOF" => "sizeof",
-        "OFFSET" => "offset", "STRUCT" => "struct", "MALLOC" => "malloc", "FREE" => "free",
-        "SYS" => "sys", "GC" => "gc", "IMPORT" => "import", "EXPORT" => "export",
+        "FOR" => "for", "CALL" => "_call", "RET" => "ret", "OBJ" => "_obj",
+        "GET" => "get", "SET" => "set", "ARR" => "_arr", "CLONE" => "clone", "CAST" => "_cast",
+        "MACRO" => "macro", "TENSOR" => "_tensor", "SETV" => "setv", "GETV" => "getv",
+        "STR" => "_str", "CAT" => "cat", "FMT" => "fmt", "BUF" => "buf", "BUFCOPY" => "bufcopy",
+        "ADDR" => "_addr", "LOADX" => "loadx", "STOREX" => "storex", "SIZEOF" => "_sizeof",
+        "OFFSET" => "_offset", "STRUCT" => "struct", "MALLOC" => "malloc", "FREE" => "free",
+        "SYS" => "_sys", "GC" => "gc", "IMPORT" => "import", "EXPORT" => "export",
         "EXTERN" => "extern", "PRINT" => "print", "SCAN" => "scan",
         "DICT" => "dict", "LIST" => "list", "PUSH" => "push", "POP" => "pop", "CHAN" => "chan",
         "ENQ" => "enq", "DEQ" => "deq", "CLOSE" => "close", "ATOM" => "atom", "AGET" => "aget",
@@ -986,6 +1194,8 @@ pub fn text_mnemonic(idx: usize) -> &'static str {
         "TRY" => "try", "RETRY" => "retry", "SPAWN" => "spawn",
         "ATOI" => "atoi", "ATOF" => "atof", "ITOA" => "itoa", "FTOA" => "ftoa",
         "ENTRY" => "entry",
+        "HASARGS" => "hasargs", "ARGI" => "argi", "SORTKEYS" => "sortkeys", "TOPN" => "topn",
+        "RANGEFOLD" => "rangefold",
         other => other, // "~NN" retired placeholders: never a valid source token
     }
 }
@@ -996,6 +1206,21 @@ pub fn mnemonic_index(tok: &str) -> Option<usize> {
 
 pub fn is_reserved(tok: &str) -> bool {
     mnemonic_index(tok).is_some()
+}
+
+/// Reject _-prefixed names — reserved for immediate-opcode mnemonics
+pub fn is_bad_ident(name: &str) -> bool {
+    name.starts_with('_')
+}
+
+/// Combined reserved-word and _-prefix check for identifiers
+pub fn check_ident(name: &str, what: &str) {
+    if is_bad_ident(name) {
+        panic!("text lex error: {}: {} — identifiers may not start with '_'", what, name);
+    }
+    if is_reserved(name) {
+        panic!("text lex error: {}: {} is a reserved word", what, name);
+    }
 }
 
 // split text source into whitespace-delimited tokens; strings keep their
@@ -1128,9 +1353,7 @@ impl TextLexer {
     }
     fn name_token(&mut self, what: &str) -> String {
         let t = self.next().unwrap_or_else(|| self.err(&format!("{} needs a name", what)));
-        if is_reserved(&t) {
-            self.err(&format!("{}: {} is a reserved word", what, t));
-        }
+        check_ident(&t, what);
         t
     }
     // stop: 0 = eof, 1 = '}', 2 = "endt"
@@ -1164,9 +1387,7 @@ impl TextLexer {
                     let l = self.name_token("addr");
                     out.push(Tok::Jump("ADDR", l));
                 } else {
-                    if is_reserved(label) {
-                        self.err("addr: reserved word as label");
-                    }
+                    check_ident(label, "addr");
                     out.push(Tok::Jump("ADDR", label.to_string()));
                 }
                 continue;
@@ -1178,9 +1399,7 @@ impl TextLexer {
                         out.push(Tok::Entry);
                         continue;
                     }
-                    if is_reserved(name) {
-                        self.err(&format!("label {} is a reserved word", name));
-                    }
+                    check_ident(name, "label");
                     out.push(Tok::LabelDef(name.to_string()));
                     continue;
                 }
@@ -1193,14 +1412,10 @@ impl TextLexer {
                         if gname.is_empty() {
                             self.err("variable name is empty");
                         }
-                        if is_reserved(gname) {
-                            self.err(&format!("variable {} is a reserved word", gname));
-                        }
+                        check_ident(gname, "variable");
                         out.push(Tok::SetV(gname.to_string()));
                     } else {
-                        if is_reserved(name) {
-                            self.err(&format!("variable {} is a reserved word", name));
-                        }
+                        check_ident(name, "variable");
                         out.push(Tok::LocalSet(name.to_string()));
                     }
                     continue;
@@ -1214,15 +1429,41 @@ impl TextLexer {
                         if gname.is_empty() {
                             self.err("variable name is empty");
                         }
-                        if is_reserved(gname) {
-                            self.err(&format!("variable {} is a reserved word", gname));
-                        }
+                        check_ident(gname, "variable");
                         out.push(Tok::GetV(gname.to_string()));
                     } else {
-                        if is_reserved(name) {
-                            self.err(&format!("variable {} is a reserved word", name));
-                        }
+                        check_ident(name, "variable");
                         out.push(Tok::LocalGet(name.to_string()));
+                    }
+                    continue;
+                }
+            }
+            // name++ / ^name++ : increment variable by 1
+            if let Some(name) = tok.strip_suffix("++") {
+                if !name.is_empty() && !tok.starts_with('+') {
+                    self.pos += 1;
+                    if let Some(gname) = name.strip_prefix('^') {
+                        if gname.is_empty() { self.err("variable name is empty"); }
+                        check_ident(gname, "variable");
+                        out.push(Tok::IncGlobal(gname.to_string()));
+                    } else {
+                        check_ident(name, "variable");
+                        out.push(Tok::IncLocal(name.to_string()));
+                    }
+                    continue;
+                }
+            }
+            // name+= / ^name+= : accumulate stack value into variable
+            if let Some(name) = tok.strip_suffix("+=") {
+                if !name.is_empty() && !tok.starts_with('+') {
+                    self.pos += 1;
+                    if let Some(gname) = name.strip_prefix('^') {
+                        if gname.is_empty() { self.err("variable name is empty"); }
+                        check_ident(gname, "variable");
+                        out.push(Tok::AddGlobal(gname.to_string()));
+                    } else {
+                        check_ident(name, "variable");
+                        out.push(Tok::AddLocal(name.to_string()));
                     }
                     continue;
                 }
@@ -1300,9 +1541,7 @@ impl TextLexer {
                                         break;
                                     }
                                     let t = self.next().unwrap();
-                                    if is_reserved(&t) {
-                                        self.err("weave: reserved word as task name");
-                                    }
+                                    check_ident(&t, "weave input");
                                     // a numeric literal in input position is the
                                     // fanout worker count (1..64, checked later)
                                     if let Some(Tok::PushI(v)) = parse_text_num(&t) {
@@ -1327,7 +1566,7 @@ impl TextLexer {
                     }
                 }
                 "task" | "endt" | "wrun" => self.err("task/endt/wrun only valid inside weave..wrun"),
-                "lit" => {
+                "_lit" => {
                     let n = self.next().unwrap_or_else(|| self.err("lit needs an operand"));
                     if let Some(id) = type_id(&n) {
                         out.push(Tok::PushI(id));
@@ -1340,18 +1579,18 @@ impl TextLexer {
                 "jmp" => self.err("jmp removed — use entry/if/while/for"),
                 "jz" => self.err("jz removed — use if/ifelse/while"),
                 "je" => self.err("je removed — use if/ifelse"),
-                "call" => {
+                "_call" => {
                     let l = self.name_token("call");
                     out.push(Tok::Jump("CALL", l));
                 }
                 "entry" => {
                     out.push(Tok::Entry);
                 }
-                "addr" => {
+                "_addr" => {
                     let l = self.name_token("addr");
                     out.push(Tok::Jump("ADDR", l));
                 }
-                "sys" => {
+                "_sys" => {
                     let n = match self.peek() {
                         Some(t) => t.parse::<usize>().ok(),
                         None => None,
@@ -1363,7 +1602,7 @@ impl TextLexer {
                         out.push(Tok::Sys(0));
                     }
                 }
-                "sizeof" => {
+                "_sizeof" => {
                     match self.peek() {
                         Some(t) if type_id(t).is_some() => {
                             let id = type_id(self.next().unwrap().as_str()).unwrap();
@@ -1377,7 +1616,7 @@ impl TextLexer {
                         None => out.push(Tok::Op("SIZEOF")),
                     }
                 }
-                "offset" => {
+                "_offset" => {
                     let sym = self.next().unwrap_or_else(|| self.err("offset needs Struct.field"));
                     let parts: Vec<&str> = sym.splitn(2, '.').collect();
                     if parts.len() == 2 {
@@ -1386,11 +1625,11 @@ impl TextLexer {
                         self.err("offset needs Struct.field");
                     }
                 }
-                "obj" | "cast" | "arr" | "tensor" => {
+                "_obj" | "_cast" | "_arr" | "_tensor" => {
                     let name = match tok.as_str() {
-                        "obj" => "OBJ",
-                        "cast" => "CAST",
-                        "arr" => "ARR",
+                        "_obj" => "OBJ",
+                        "_cast" => "CAST",
+                        "_arr" => "ARR",
                         _ => "TENSOR",
                     };
                     let needs_swp = name == "ARR" || name == "TENSOR";
@@ -1418,7 +1657,7 @@ impl TextLexer {
                     }
                 }
                 "scan" | "print" => out.push(Tok::Op(if tok == "scan" { "SCAN" } else { "PRINT" })),
-                "str" => {
+                "_str" => {
                     let n = self.next().unwrap_or_else(|| self.err("str needs a string"));
                     match unquote(&n) {
                         Some(s) => out.push(Tok::PushS(s)),
@@ -1426,12 +1665,18 @@ impl TextLexer {
                     }
                 }
                 "setv" | "getv" => self.err("use name! / name@ for variables"),
+                // backward-compat: old immediate-op names now _-prefixed
+                "call" | "addr" | "sys" | "lit" | "str" | "sizeof" | "offset" | "obj" | "cast" | "arr" | "tensor" => {
+                    self.err(&format!("'{}' is now '_{}' — immediate ops are _-prefixed", tok, tok));
+                }
                 _ => {
                     if let Some(idx) = mnemonic_index(&tok) {
                         // plain opcode with no operand handling
                         out.push(Tok::Op(OP_NAMES[idx]));
                     } else if let Some(t) = parse_text_num(&tok) {
                         out.push(t);
+                    } else if is_bad_ident(&tok) {
+                        self.err(&format!("identifier '{}' — identifiers may not start with '_'", tok));
                     } else {
                         out.push(Tok::Ident(tok));
                     }

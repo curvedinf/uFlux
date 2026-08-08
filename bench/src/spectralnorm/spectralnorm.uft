@@ -2,88 +2,67 @@ import c"sqrt"(float)->float
 av:
 an! av!
 an@ arr float tmp!
-0 i!
-'avcond 'avbody while
+an@ 'avbody for
 tmp@ ret
-avcond:
-i@ an@ lt ret
 avbody:
+i!
 0 sm!
-0 j!
-'avinner 'avinner2 while
+an@ 'avinner for
 tmp@ i@ sm@ vset
-i@ 1 + i!
-0 ret
+ret
 avinner:
-j@ an@ lt ret
-avinner2:
+j!
 i@ j@ + dup 1 + * 2 div i@ + 1 + ea!
 av@ j@ vget ea@ div sm@ + sm!
-j@ 1 + j!
-0 ret
+ret
 atv:
 bn! bv!
 bn@ arr float tmp!
-0 i!
-'atcond 'atbody while
+bn@ 'atbody for
 tmp@ ret
-atcond:
-i@ bn@ lt ret
 atbody:
+i!
 0 sm!
-0 j!
-'atinner 'atinner2 while
+bn@ 'atinner for
 tmp@ i@ sm@ vset
-i@ 1 + i!
-0 ret
+ret
 atinner:
-j@ bn@ lt ret
-atinner2:
+j!
 j@ i@ + dup 1 + * 2 div j@ + 1 + ea!
 bv@ j@ vget ea@ div sm@ + sm!
-j@ 1 + j!
-0 ret
+ret
 atac:
 n! x!
 n@ an! n@ bn!
 x@ n@ call av t1!
 t1@ n@ call atv
 ret
-itcond:
-it@ 10 lt ret
-itbody:
-u@ n@ call atac v!
-v@ n@ call atac u!
-it@ 1 + it!
-0 ret
 entry
 5500 n!
-argv len 1 gt 'setn if
+hasargs 'setn if
 n@ arr float u!
 n@ arr float v!
-0 k!
-'ucond 'ubody while
-0 it!
-'itcond 'itbody while
+n@ 'ubody for
+10 'itbody for
 0 vbv!
 0 vv!
-0 k!
-'scond 'sbody while
+n@ 'sbody for
 vbv@ vv@ div call sqrt "%.9f\n" print
 ret
 setn:
-argv 1 get atoi n!
+1 argi n!
 0 ret
-ucond:
-k@ n@ lt ret
 ubody:
+k!
 u@ k@ 1.0 vset
-k@ 1 + k!
-0 ret
-scond:
-k@ n@ lt ret
+ret
+itbody:
+drop
+u@ n@ call atac v!
+v@ n@ call atac u!
+ret
 sbody:
+k!
 u@ k@ vget v@ k@ vget * vbv@ + vbv!
 v@ k@ vget v@ k@ vget * vv@ + vv!
-k@ 1 + k!
-0 ret
+ret

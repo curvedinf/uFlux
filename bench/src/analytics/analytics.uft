@@ -13,24 +13,15 @@ proc:
 ^cr@ 3 total@ faddto
 ^rows@ 1 + ^rows!
 0 ret
-selmax:
-drop
--1.0 bestv! "" bestk!
-kl@ len 'selscan for
+emitrow:
+idx!
+curdict@ n@ topn pairs!
+pairs@ idx@ get kv!
+kv@ 0 get name!
+kv@ 1 get val!
 rank@ 1 + rank!
-prefix@ rank@ bestk@ curdict@ bestk@ getq "%s%d: %s $%.2f\n" print drop
-^sel@ bestk@ 1 addto
+prefix@ rank@ name@ val@ "%s%d: %s $%.2f\n" print drop
 ret
-selscan:
-k!
-kl@ k@ get name!
-^sel@ name@ getq not 'selchk if
-ret
-selchk:
-curdict@ name@ getq v!
-v@ bestv@ gt 'selupd if
-0 ret
-selupd: v@ bestv! name@ bestk! 0 ret
 useargv:
 argv 1 get p!
 0 ret
@@ -40,7 +31,7 @@ dict ^rr!
 dict ^pr!
 dict ^cr!
 "bench/data/sales.csv" p!
-argv len 1 gt 'useargv if
+hasargs 'useargv if
 p@ "," 0 'fl fsplit drop
 "=== DATA ANALYTICS RESULTS ===\n" print drop
 ^rows@ "total_rows: %d\n" print
@@ -48,12 +39,15 @@ p@ "," 0 'fl fsplit drop
 ^tr@ ^rows@ div "avg_order: %.2f\n" print
 ^tu@ "total_units: %d\n" print
 "region_" prefix!
-^rr@ curdict! ^rr@ keys rk! rk@ sort rk! rk@ kl!
-dict ^sel! 0 rank! 6 'selmax for
+^rr@ curdict! 6 n! 0 rank!
+curdict@ n@ topn pairs!
+pairs@ len 'emitrow for
 "product_" prefix!
-^pr@ curdict! ^pr@ keys pk! pk@ sort pk! pk@ kl!
-dict ^sel! 0 rank! 5 'selmax for
+^pr@ curdict! 5 n! 0 rank!
+curdict@ n@ topn pairs!
+pairs@ len 'emitrow for
 "country_" prefix!
-^cr@ curdict! ^cr@ keys ck! ck@ sort ck! ck@ kl!
-dict ^sel! 0 rank! 3 'selmax for
+^cr@ curdict! 3 n! 0 rank!
+curdict@ n@ topn pairs!
+pairs@ len 'emitrow for
 ret

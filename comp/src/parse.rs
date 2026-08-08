@@ -53,6 +53,7 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
         init_pcs: Vec::new(),
         entry_label: None,
         local_counts: HashMap::new(),
+        local_names: HashMap::new(),
     };
     let mut q: VecDeque<Tok> = toks.into();
     let mut pending_export: Option<String> = None;
@@ -112,6 +113,28 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
             }
             Tok::LocalGet(n) => {
                 p.ins.push(Ins::LocalGet(n));
+            }
+            Tok::IncLocal(n) => {
+                p.ins.push(Ins::PushI(1));
+                p.ins.push(Ins::LocalGet(n.clone()));
+                p.ins.push(simple_ins("ADD"));
+                p.ins.push(Ins::LocalSet(n));
+            }
+            Tok::AddLocal(n) => {
+                p.ins.push(Ins::LocalGet(n.clone()));
+                p.ins.push(simple_ins("ADD"));
+                p.ins.push(Ins::LocalSet(n));
+            }
+            Tok::IncGlobal(n) => {
+                p.ins.push(Ins::PushI(1));
+                p.ins.push(Ins::GetV(n.clone()));
+                p.ins.push(simple_ins("ADD"));
+                p.ins.push(Ins::SetV(n));
+            }
+            Tok::AddGlobal(n) => {
+                p.ins.push(Ins::GetV(n.clone()));
+                p.ins.push(simple_ins("ADD"));
+                p.ins.push(Ins::SetV(n));
             }
             Tok::Import(im) => {
                 if !p.imports.iter().any(|x| x.name == im.name) {
@@ -525,6 +548,9 @@ pub fn resolve_locals(p: &mut Parsed) {
     // Step 5: Record frame sizes and resolve instructions.
     for (&body, slots) in &body_slots {
         p.local_counts.insert(body, slots.len());
+        let mut names: Vec<(String, usize)> = slots.iter().map(|(n, &id)| (n.clone(), id)).collect();
+        names.sort_by_key(|(_, id)| *id);
+        p.local_names.insert(body, names.into_iter().map(|(n, _)| n).collect());
     }
     for (i, ins) in p.ins.iter_mut().enumerate() {
         let body = ins_body[i];
@@ -574,6 +600,7 @@ pub fn merge_tus(tus: Vec<Parsed>, mods: Vec<String>, init_flags: &[bool]) -> Pa
         init_pcs: Vec::new(),
         entry_label: None,
         local_counts: HashMap::new(),
+        local_names: HashMap::new(),
     };
     for (tu_idx, (tu, defmod)) in tus.into_iter().zip(mods).enumerate() {
         let modname = tu.modname.clone().unwrap_or(defmod);
@@ -850,6 +877,11 @@ pub fn simple_ins(name: &'static str) -> Ins {
         "ATOF" => "op_atof",
         "ITOA" => "op_itoa",
         "FTOA" => "op_ftoa",
+        "HASARGS" => "op_hasargs",
+        "ARGI" => "op_argi",
+        "SORTKEYS" => "op_sortkeys",
+        "TOPN" => "op_topn",
+        "RANGEFOLD" => "op_rangefold",
         other => panic!("no helper for {}", other),
     };
     Ins::Simple(helper)

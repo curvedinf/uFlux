@@ -1,6 +1,10 @@
 use crate::ast::*;
 use crate::prelude::PRELUDE;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// Set by gen() when --debug is active; read by emit_range() to skip register caching.
+static UF_DEBUG: AtomicBool = AtomicBool::new(false);
 
 // ---------------- codegen ----------------
 pub fn c_type(t: &str) -> &'static str {
@@ -502,7 +506,7 @@ pub fn emit_range(
                                 let t = vstack[idx].clone();
                                 vstack.push(t);
                             } else {
-                                e.push_str("op_dup(cx);");
+                                e.push_str("uf_cur_op=\"op_dup\";op_dup(cx);");
                             }
                         }
                         "op_ovr" => {
@@ -513,12 +517,12 @@ pub fn emit_range(
                                 vstack.push(t);
                             } else {
                                 vflush(&mut e, &mut vstack, &mut vcache);
-                                e.push_str("op_ovr(cx);");
+                                e.push_str("uf_cur_op=\"op_ovr\";op_ovr(cx);");
                             }
                         }
                         "op_drp" => {
                             if vstack.pop().is_none() {
-                                e.push_str("op_drp(cx);");
+                                e.push_str("uf_cur_op=\"op_drp\";op_drp(cx);");
                             }
                         }
                         "op_swp" => {
@@ -527,7 +531,7 @@ pub fn emit_range(
                                 vstack.swap(n - 1, n - 2);
                             } else {
                                 vflush(&mut e, &mut vstack, &mut vcache);
-                                e.push_str("op_swp(cx);");
+                                e.push_str("uf_cur_op=\"op_swp\";op_swp(cx);");
                             }
                         }
                         "op_vget" => {
@@ -571,7 +575,7 @@ pub fn emit_range(
                             }
                         }
                         _ => {
-                            let is_inlined_ffold = (*h == "op_ffold" || *h == "op_fsplit") && depth < 8 && inline_ffolds.contains_key(&i);
+                            let is_inlined_ffold = (*h == "op_ffold" || *h == "op_fsplit" || *h == "op_rangefold") && depth < 8 && inline_ffolds.contains_key(&i);
                             if is_inlined_ffold {
                                 if let Some((bs, be)) = inline_ffolds.get(&i).copied() {
                                     vflush(&mut e, &mut vstack, &mut vcache);
@@ -582,7 +586,7 @@ pub fn emit_range(
                                         let inner = format!("{}FF{}_", prefix, i);
                                         emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, outlined_bodies, suppress, ext_idx, bs, be, &inner, depth + 1, local_types, ins_body, &HashMap::new(), &std::collections::HashSet::new(), &HashMap::new());
                                         e.push_str(&format!("K_FF_C_{}{}:;_ff_acc=pop(cx);}}K_FF_E_{}{}:;cx->lsp=fr;free(_line);fclose(_fp);pushc(cx,_ff_acc);}}\n", prefix, i, prefix, i));
-                                    } else {
+                                    } else if *h == "op_fsplit" {
                                         /* inlined FSPLIT: getline loop + in-place split + field offsets + callback */
                                         e.push_str("{Cell _ff_acc=pop(cx),_ff_sep=pop(cx),_ff_p=pop(cx);const char*_E=uf_sptr(_ff_sep);if(!*_E)die(\"FSPLIT: empty separator\");size_t _el=strlen(_E);FILE*_fp=fopen(uf_sptr(_ff_p),\"r\");if(!_fp)die(\"FSPLIT: cannot open file\");char*_line=0;size_t _ncap=0;ssize_t m;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FF_C_");
                                         e.push_str(&format!("{}{};cx->loops[fr].end=&&K_FF_E_{}{};while((m=getline(&_line,&_ncap,_fp))>=0){{\n", prefix, i, prefix, i));
@@ -595,11 +599,17 @@ pub fn emit_range(
                                         let inner = format!("{}FF{}_", prefix, i);
                                         emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, outlined_bodies, suppress, ext_idx, bs, be, &inner, depth + 1, local_types, ins_body, &HashMap::new(), &std::collections::HashSet::new(), &HashMap::new());
                                         e.push_str(&format!("K_FF_C_{}{}:;_ff_acc=pop(cx);}}K_FF_E_{}{}:;cx->lsp=fr;free(_line);fclose(_fp);uf_fsplit_line=0;pushc(cx,_ff_acc);}}\n", prefix, i, prefix, i));
+                                    } else if *h == "op_rangefold" {
+                                        /* inlined RANGEFOLD: count loop + callback */
+                                        e.push_str(&format!("{{Cell _rf_acc=pop(cx);int64_t _rf_cnt=uf_i(pop(cx));long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_RF_C_{}{};cx->loops[fr].end=&&K_RF_E_{}{};for(int64_t _rf_k=0;_rf_k<_rf_cnt;_rf_k++){{pushc(cx,_rf_acc);pushi(cx,_rf_k);\n", prefix, i, prefix, i));
+                                        let inner = format!("{}RF{}_", prefix, i);
+                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, outlined_bodies, suppress, ext_idx, bs, be, &inner, depth + 1, local_types, ins_body, &HashMap::new(), &std::collections::HashSet::new(), &HashMap::new());
+                                        e.push_str(&format!("K_RF_C_{}{}:;_rf_acc=pop(cx);}}K_RF_E_{}{}:;cx->lsp=fr;pushc(cx,_rf_acc);}}\n", prefix, i, prefix, i));
                                     }
                                 }
                             } else {
                                 vflush(&mut e, &mut vstack, &mut vcache);
-                                e.push_str(&format!("{}(cx);\n", h));
+                                e.push_str(&format!("uf_cur_op=\"{}\";{}(cx);\n", h, h));
                             }
                         }
                     }
@@ -626,7 +636,11 @@ pub fn emit_range(
                         // no calls and takes no indirect jumps except IFs
                         // whose continuation is a trivial loop exit
                         // (break/cont then ret) that never touches locals.
-                        let mut reg: HashMap<usize, (String, VType)> = HashMap::new();
+                        // Inherit parent's register cache so nested for loops
+                        // share the same C locals without cx->locals[] round-trips.
+                        let inherited: std::collections::HashSet<usize> = reg.keys().copied().collect();
+                        let inherited_arr: HashMap<String, String> = arr_ptr.clone();
+                        let mut reg: HashMap<usize, (String, VType)> = reg.clone();
                         {
                             let trivial_exit = |tb: usize| -> bool {
                                 match for_body_range(&p.ins, tb) {
@@ -636,9 +650,10 @@ pub fn emit_range(
                                     None => false,
                                 }
                             };
-                            let escapable = (bs..be).any(|k| match &p.ins[k] {
+                            let escapable = UF_DEBUG.load(Ordering::Relaxed) || (bs..be).any(|k| match &p.ins[k] {
                                 Ins::Call(_) | Ins::CallExt(_) | Ins::Sys(_) |
-                                Ins::Weave(_) | Ins::Send | Ins::Goto(_) | Ins::While | Ins::For => true,
+                                Ins::Weave(_) | Ins::Send | Ins::Goto(_) | Ins::While => true,
+                                Ins::For => !inline_fors.contains_key(&k),
                                 Ins::If => {
                                     if k > bs {
                                         match &p.ins[k - 1] {
@@ -655,8 +670,11 @@ pub fn emit_range(
                                     }
                                 }
                                 Ins::PushAddr(_) => {
-                                    // allowed only when feeding a checked If
-                                    !matches!(p.ins.get(k + 1), Some(Ins::If))
+                                    match p.ins.get(k + 1) {
+                                        Some(Ins::If) => false,
+                                        Some(Ins::For) => !inline_fors.contains_key(&(k + 1)),
+                                        _ => true,
+                                    }
                                 }
                                 Ins::Simple(h) => *h == "op_ffold" || *h == "op_fsplit",
                                 _ => false,
@@ -683,27 +701,87 @@ pub fn emit_range(
                         }
                         let mut regs: Vec<_> = reg.iter().collect();
                         regs.sort_by_key(|(id, _)| *id);
+                        // Hoist float-array element pointers: same logic as the
+                        // while-inlining path. FloatArr slots never reassigned
+                        // inside the loop get a raw double* C local.
+                        let mut arr_ptr: HashMap<String, String> = HashMap::new();
+                        {
+                            let escapable2 = UF_DEBUG.load(Ordering::Relaxed) || (bs..be).any(|k| match &p.ins[k] {
+                                Ins::Break | Ins::Cont | Ins::Call(_) | Ins::CallExt(_) | Ins::Sys(_) |
+                                Ins::Weave(_) | Ins::Send | Ins::Goto(_) | Ins::While |
+                                Ins::If | Ins::IfElse => true,
+                                Ins::For => !inline_fors.contains_key(&k),
+                                Ins::PushAddr(_) => {
+                                    match p.ins.get(k + 1) {
+                                        Some(Ins::If) => false,
+                                        Some(Ins::For) => inline_fors.contains_key(&(k + 1)),
+                                        _ => true,
+                                    }
+                                }
+                                Ins::Simple(h) => *h == "op_ffold" || *h == "op_fsplit",
+                                _ => false,
+                            });
+                            if !escapable2 {
+                                let mut reassigned: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                                for k in bs..be {
+                                    if let Ins::LocalSetI(id) = &p.ins[k] { reassigned.insert(*id); }
+                                }
+                                for k in bs..be {
+                                    if let Ins::LocalGetI(id) = &p.ins[k] {
+                                        if reassigned.contains(id) { continue; }
+                                        let key = ins_body[k] * 1000000 + id;
+                                        if local_types.get(&key).copied() == Some(VType::FloatArr) {
+                                            arr_ptr.insert(
+                                                format!("cx->locals[cx->local_base+{}]", id),
+                                                format!("_a{}", id));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let mut arrps: Vec<_> = arr_ptr.iter().collect();
+                        arrps.sort();
                         e.push_str(&format!("{{int64_t cnt=pop(cx).i;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FC_{}{};cx->loops[fr].end=&&K_FE_{}{};\n", prefix, i, prefix, i));
+                        // Only declare registers new to this loop scope;
+                        // inherited ones are already in C locals from the parent.
                         for (id, (name, ty)) in &regs {
+                            if inherited.contains(id) { continue; }
                             match ty {
                                 VType::Int => e.push_str(&format!("int64_t {}=uf_i(cx->locals[cx->local_base+{}]);\n", name, id)),
                                 VType::Float => e.push_str(&format!("double {}=uf_f(cx->locals[cx->local_base+{}]);\n", name, id)),
                                 _ => e.push_str(&format!("Cell {}=cx->locals[cx->local_base+{}];\n", name, id)),
                             }
                         }
+                        for (expr, name) in &arrps {
+                            if inherited_arr.contains_key(expr.as_str()) { continue; }
+                            e.push_str(&format!("double* {}=(double*)uf_data((Hdr*)({}).i);\n", name, expr));
+                        }
                         // If the body immediately DROPs the pushed iteration
                         // index, skip both the push and the drop.
+                        // If the body immediately stores the index into a
+                        // register-cached Int local, assign uf_k directly
+                        // and skip the push/pop/store.
                         let skip_idx = matches!(&p.ins[bs], Ins::Simple(h) if *h == "op_drp");
+                        let reg_store = if !skip_idx {
+                            if let Ins::LocalSetI(id) = &p.ins[bs] {
+                                if let Some((name, VType::Int)) = reg.get(id) {
+                                    Some((name, *id))
+                                } else { None }
+                            } else { None }
+                        } else { None };
                         if skip_idx {
                             e.push_str("for(int64_t uf_k=0;uf_k<cnt;uf_k++){\n");
+                        } else if let Some((name, _)) = &reg_store {
+                            e.push_str(&format!("for(int64_t uf_k=0;uf_k<cnt;uf_k++){{{}=uf_k;\n", name));
                         } else {
                             e.push_str("for(int64_t uf_k=0;uf_k<cnt;uf_k++){pushi(cx,uf_k);\n");
                         }
-                        let eff_bs = if skip_idx { bs + 1 } else { bs };
+                        let eff_bs = if skip_idx || reg_store.is_some() { bs + 1 } else { bs };
                         let inner = format!("{}F{}_", prefix, i);
-                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, outlined_bodies, suppress, ext_idx, eff_bs, be, &inner, depth + 1, local_types, ins_body, &reg, numeric, &HashMap::new());
+                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, outlined_bodies, suppress, ext_idx, eff_bs, be, &inner, depth + 1, local_types, ins_body, &reg, numeric, &arr_ptr);
                         e.push_str(&format!("K_FC_{}{}:;}}\nK_FE_{}{}:;", prefix, i, prefix, i));
                         for (id, (name, ty)) in &regs {
+                            if inherited.contains(id) { continue; }
                             match ty {
                                 VType::Int => e.push_str(&format!("cx->locals[cx->local_base+{}]=uf_mki({});", id, name)),
                                 VType::Float => e.push_str(&format!("cx->locals[cx->local_base+{}]=uf_mkf({});", id, name)),
@@ -740,20 +818,27 @@ pub fn emit_range(
                 }
                 // Check if this call was outlined to a separate function
                 if let Some(&(bs, _be)) = outlined_bodies.get(&i) {
+                    if UF_DEBUG.load(Ordering::Relaxed) {
+                        e.push_str(&format!("cx->call_pcs[cx->call_csp++]={};", bs));
+                    }
                     e.push_str(&format!("uf_ob_{}(cx);\n", bs));
                     o.push_str(&e);
                     continue;
                 }
                 let target_pc = resolve(l);
                 let lc = p.local_counts.get(&target_pc).copied().unwrap_or(0);
+                let call_pc_push = if UF_DEBUG.load(Ordering::Relaxed) { format!("cx->call_pcs[cx->call_csp++]={};", target_pc) } else { String::new() };
+                let call_pc_pop = if UF_DEBUG.load(Ordering::Relaxed) { "cx->call_csp--;".to_string() } else { String::new() };
                 e.push_str(&format!(
-                    "cx->local_frames[cx->local_fsp++]=cx->local_base;cx->local_base+={};cx->cs[cx->csp++]=&&K_{}{};goto L_{};K_{}{}:;cx->local_base=cx->local_frames[--cx->local_fsp];\n",
+                    "cx->local_frames[cx->local_fsp++]=cx->local_base;cx->local_base+={};{}cx->cs[cx->csp++]=&&K_{}{};goto L_{};K_{}{}:;cx->local_base=cx->local_frames[--cx->local_fsp];{}\n",
                     lc,
+                    call_pc_push,
                     prefix,
                     i,
                     target_pc,
                     prefix,
-                    i
+                    i,
+                    call_pc_pop
                 ))
             }
             Ins::Ret => {
@@ -763,17 +848,14 @@ pub fn emit_range(
                     // and returns to caller. The frame setup/restore is split:
                     // setup is in the function wrapper, restore is here because
                     // we need to return from inside the body.
-                    e.push_str("{cx->local_base=cx->local_frames[--cx->local_fsp];return;}\n");
+                    let pop = if UF_DEBUG.load(Ordering::Relaxed) { "cx->call_csp--;" } else { "" };
+                    e.push_str(&format!("{{cx->local_base=cx->local_frames[--cx->local_fsp];{}return;}}\n", pop));
                 } else {
                     // v11: standard RET. The CALL path handles frame restore in the
                     // K_after_call continuation. The uf_call_addr path (try/retry/
                     // exports/callbacks) pushes a NULL return sentinel.
                     e.push_str("{if(cx->csp==0)return;{const void* r=cx->cs[--cx->csp];if(!r)return;goto *r;}}\n");
                 }
-            }
-            Ins::Goto(l) => {
-                vflush(&mut e, &mut vstack, &mut vcache);
-                e.push_str(&format!("goto {};\n", plab(prefix, resolve(l))))
             }
             Ins::Goto(l) => {
                 vflush(&mut e, &mut vstack, &mut vcache);
@@ -834,7 +916,7 @@ pub fn emit_range(
                         // and be written back once at loop exit.
                         let mut reg: HashMap<usize, (String, VType)> = HashMap::new();
                         {
-                            let escapable = (cbs..cbe_trim).chain(bbs..bbe_trim).any(|k| match &p.ins[k] {
+                            let escapable = UF_DEBUG.load(Ordering::Relaxed) || (cbs..cbe_trim).chain(bbs..bbe_trim).any(|k| match &p.ins[k] {
                                 Ins::Break | Ins::Cont | Ins::Call(_) | Ins::CallExt(_) | Ins::Sys(_) |
                                 Ins::Weave(_) | Ins::Send | Ins::Goto(_) | Ins::While | Ins::For |
                                 Ins::If | Ins::IfElse | Ins::PushAddr(_) => true,
@@ -1096,6 +1178,7 @@ pub fn emit_range(
             Ins::CallExt(ii) => {
                 vflush(&mut e, &mut vstack, &mut vcache);
                 let im = &p.imports[*ii];
+                e.push_str(&format!("uf_cur_op=\"{}\";", im.name));
                 e.push_str(&gen_call_ext(im, &format!("uf_im{}", ii)));
             }
             Ins::Send => {
@@ -1261,6 +1344,25 @@ fn compute_local_types(p: &Parsed) -> (HashMap<usize, VType>, Vec<usize>, std::c
     // seeded: parameter slots typed by call-site evidence.
     let mut conflicted: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
     let mut seeded: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+
+    // Pre-seed for-body iteration index slots: the `for` opcode pushes an
+    // integer index, so the first LocalSetI at the start of any for-body
+    // label receives an Int. This lets register caching fire for loop
+    // counters even in continuation bodies (which share the parent
+    // function's body key).
+    for j in 1..p.ins.len() {
+        if let (Ins::PushAddr(l), Ins::For) = (&p.ins[j - 1], &p.ins[j]) {
+            if let Some(&bs) = p.labels.get(l) {
+                // The first LocalSetI at bs receives the iteration index.
+                if let Some(Ins::LocalSetI(id)) = p.ins.get(bs) {
+                    let body = ins_body[bs];
+                    let key = (body, *id);
+                    result.insert(key, VType::Int);
+                    seeded.insert(key);
+                }
+            }
+        }
+    }
     let mut changed_outer = true;
     let mut outer_iter = 0;
     while changed_outer && outer_iter < 10 {
@@ -1585,7 +1687,8 @@ fn compute_local_types(p: &Parsed) -> (HashMap<usize, VType>, Vec<usize>, std::c
     )
 }
 
-pub fn gen(p: &Parsed, structs: &StructMap) -> String {
+pub fn gen(p: &Parsed, structs: &StructMap, debug: bool) -> String {
+    UF_DEBUG.store(debug, Ordering::Relaxed);
     let mut o = String::new();
     o.push_str(PRELUDE);
     // reflection: struct layouts sorted by sid, consumed by op_fields
@@ -1666,6 +1769,50 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
             p.vars.iter().map(|v| format!("&var_{}", v)).collect::<Vec<_>>().join(",")
         ));
     }
+    // ---- debug metadata (--debug / -D) ----
+    if debug {
+        // global variable names
+        if !p.vars.is_empty() {
+            o.push_str(&format!(
+                "static const char* uf_vnames_v[] = {{{}}};\n",
+                p.vars.iter().map(|v| format!("\"{}\"", v)).collect::<Vec<_>>().join(",")
+            ));
+        } else {
+            o.push_str("static const char** uf_vnames_v = 0;\n");
+        }
+        // PC -> label name table (inverse of p.labels)
+        let n_dbg = p.ins.len() + 1;
+        o.push_str(&format!("static const char* uf_labnames_v[{}];\n", n_dbg));
+        let mut pc_to_name: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
+        for (name, &pc) in &p.labels {
+            pc_to_name.entry(pc).or_insert(name.as_str());
+        }
+        o.push_str("static void uf_init_labnames(void){");
+        for (&pc, &name) in &pc_to_name {
+            o.push_str(&format!("uf_labnames_v[{}]=\"{}\";", pc, name));
+        }
+        if !pc_to_name.contains_key(&0) {
+            o.push_str("uf_labnames_v[0]=\"<entry>\";");
+        }
+        o.push_str("uf_labnames=uf_labnames_v;}\n");
+        o.push_str(&format!("static long uf_labnames_n = {};\n", n_dbg));
+        // local names per body: emit name arrays at file scope, then init function
+        o.push_str(&format!("static const char** uf_ln_tab_v[{}];\nstatic long uf_ln_cnt_v[{}];\n", n_dbg, n_dbg));
+        for (&body_pc, names) in &p.local_names {
+            if names.is_empty() { continue; }
+            o.push_str(&format!(
+                "static const char* uf_ln_b{}[]={{{}}};\n",
+                body_pc,
+                names.iter().map(|n| format!("\"{}\"", n)).collect::<Vec<_>>().join(",")
+            ));
+        }
+        o.push_str("static void uf_init_local_names(void){");
+        for (&body_pc, names) in &p.local_names {
+            if names.is_empty() { continue; }
+            o.push_str(&format!("uf_ln_tab_v[{}]=uf_ln_b{};uf_ln_cnt_v[{}]={};", body_pc, body_pc, body_pc, names.len()));
+        }
+        o.push_str("uf_ln_tab=uf_ln_tab_v;uf_ln_cnt=uf_ln_cnt_v;}\n");
+    }
     // v11: per-label local frame sizes. We emit a flat array indexed by
     // instruction PC (sparse, but simple and fast). uf_local_counts[pc] gives
     // the frame size for the call-entry label starting at pc.
@@ -1685,7 +1832,7 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
     let resolve = |name: &str| -> usize {
         *p.labels.get(name).unwrap_or_else(|| panic!("undefined label {}", name))
     };
-    o.push_str("\nstatic void uflux_run(Ctx*cx, long pc){\n  if(pc<0){ goto *(void*)uf_entry_addr; }\n  /* v11: set up the entry label's local frame */\n  cx->local_frames[cx->local_fsp++]=cx->local_base; cx->local_base+=uf_lc(pc);\n");
+    o.push_str("\nstatic void uflux_run(Ctx*cx, long pc){\n  uf_current_ctx=cx;\n  if(pc<0){ goto *(void*)uf_entry_addr; }\n  /* v11: set up the entry label's local frame */\n  cx->local_frames[cx->local_fsp++]=cx->local_base; cx->local_base+=uf_lc(pc);\n");
     let n = p.ins.len();
     // Only labels that can be entered dynamically (initial pc, FOR bodies via
     // PushAddr, weave task entries, SEND methods, exports) go into labtab.
@@ -1804,6 +1951,16 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
                     }
                 }
             }
+            // RANGEFOLD inlining: same pattern as FFOLD
+            if *h == "op_rangefold" && !targets.contains(&(j - 1)) {
+                let bs = resolve(l);
+                if let Some(be) = for_body_range(&p.ins, bs) {
+                    if inlinable_for(p, bs, be) {
+                        inline_ffolds.insert(j, (bs, be));
+                        suppress.insert(j - 1);
+                    }
+                }
+            }
         }
         // CALL inlining: detect Ins::Call(label) where body is inlinable.
         // v11: skip inlining if the target body (or any PushAddr continuation
@@ -1865,9 +2022,12 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
             // Must use locals
             let has_locals = (bs..be).any(|k| matches!(p.ins[k], Ins::LocalSetI(_) | Ins::LocalGetI(_)));
             if !has_locals { continue; }
-            // Must contain at least one while loop (the hot pattern)
-            let has_while = (bs..be).any(|k| matches!(p.ins[k], Ins::While));
-            if !has_while { continue; }
+            // Must contain at least one while or inlined-for loop (the hot pattern)
+            let has_loop = (bs..be).any(|k| {
+                matches!(p.ins[k], Ins::While) ||
+                (matches!(p.ins[k], Ins::For) && inline_fors.contains_key(&k))
+            });
+            if !has_loop { continue; }
             // Must not call other uf bodies (only externs/simple ops)
             let calls_others = (bs..be).any(|k| matches!(&p.ins[k], Ins::Call(_)));
             if calls_others { continue; }
@@ -1895,7 +2055,7 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
         emit_range(&mut outlined_fns, p, &targets, &inline_fors, &inline_ffolds, &inline_whiles, &inline_calls, &outlined_bodies, &suppress, &ext_idx, bs, be, &ob_prefix, 0, &mut local_types, &ins_body, &HashMap::new(), &numeric_slots, &HashMap::new());
         // If the body has no explicit RET at the end (shouldn't happen, but
         // be safe), restore the frame.
-        outlined_fns.push_str("cx->local_base=cx->local_frames[--cx->local_fsp];}\n");
+        outlined_fns.push_str(&format!("cx->local_base=cx->local_frames[--cx->local_fsp];{}}}\n", if UF_DEBUG.load(Ordering::Relaxed) { "cx->call_csp--;" } else { "" }));
     }
     // Insert outlined functions after uf_lc but before uflux_run's body
     if !outlined_fns.is_empty() {
@@ -1922,7 +2082,10 @@ pub fn gen(p: &Parsed, structs: &StructMap) -> String {
     }
     let lits_arg = if p.strings.is_empty() { "0,0".to_string() } else { format!("uf_lits,{}", p.strings.len()) };
     let roots_arg = if p.vars.is_empty() { "0,0".to_string() } else { format!("uf_vroots,{}", p.vars.len()) };
-    o.push_str(&format!("int main(int argc,char**argv){{uf_argc=argc;uf_argv=(void*)argv;uf_init_reflection();uf_init_locals();uf_init_lits({});uf_gc_setroots({});uf_gc_init();uflux_run(main_cx,0);return 0;}}\n", lits_arg, roots_arg));
+    let dbg_init = if debug {
+        "uf_debug_mode=1;uf_vnames=uf_vnames_v;uf_init_labnames();uf_init_local_names();"
+    } else { "" };
+    o.push_str(&format!("int main(int argc,char**argv){{uf_argc=argc;uf_argv=(void*)argv;uf_init_reflection();uf_init_locals();{}uf_init_lits({});uf_gc_setroots({});uf_gc_init();uflux_run(main_cx,0);return 0;}}\n", dbg_init, lits_arg, roots_arg));
     o
 }
 

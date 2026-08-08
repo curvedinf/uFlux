@@ -1,0 +1,115 @@
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Native builds: compile directly on the matching runner.
+  # Produces a binary named `uf` (uf.exe on Windows) for every major OS.
+  native:
+    name: Native ${{ matrix.artifact }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: uf-linux-x86_64
+            bin: uf
+          - os: macos-13
+            artifact: uf-macos-x86_64
+            bin: uf
+          - os: macos-14
+            artifact: uf-macos-arm64
+            bin: uf
+          - os: windows-latest
+            artifact: uf-windows-x86_64
+            bin: uf.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: comp
+
+      - name: Build (release)
+        working-directory: comp
+        run: cargo build --release
+
+      - name: Smoke test (--help)
+        working-directory: comp
+        run: ./target/release/${{ matrix.bin }} --help
+
+      # Rename to `uf` (Windows already produces uf.exe)
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp comp/target/release/${{ matrix.bin }} staging/uf${{ matrix.bin == 'uf.exe' && '.exe' || '' }}
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: staging/*
+          if-no-files-found: error
+
+  # Cross-compiled Linux builds using `cross` (Docker-based, handles the
+  # linker/sysroot automatically). All produce a binary named `uf`.
+  cross-linux:
+    name: Cross ${{ matrix.artifact }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            artifact: uf-linux-arm64
+          - target: armv7-unknown-linux-gnueabihf
+            artifact: uf-linux-armv7
+          - target: x86_64-unknown-linux-musl
+            artifact: uf-linux-x86_64-musl
+          - target: aarch64-unknown-linux-musl
+            artifact: uf-linux-arm64-musl
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        run: cargo install cross
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: comp
+
+      - name: Build (release)
+        working-directory: comp
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Stage binary
+        run: |
+          mkdir -p staging
+          cp comp/target/${{ matrix.target }}/release/uf staging/uf
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: staging/uf
+          if-no-files-found: error

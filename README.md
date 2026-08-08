@@ -1,138 +1,111 @@
 # µFlux
 
-µFlux (Micro Flux) is a programming language designed for **LLM-authored one-off scripts**. 
-It is optimized for low token count, fast data processing, and inherent reliability. µFlux 
-is used like a scripting language inline in your existing CLI, but every script is actually 
-a C compiled binary so it is near maximally fast. Many powerful features are integrated as 
-core language operations, enabling immediate optimal results from LLM tool use.
+A scripting language that gives you **Python convenience at near-native speed**.
 
-### Language at a glance
+When an LLM writes Python for a data task, it's slow. When it writes C++,
+it spends 3× the tokens on boilerplate. µFlux splits the difference: fewer
+tokens than C++/Rust, 3–4× faster than Python, built-in ops for everything.
 
-| Property | µFlux |
+## Language Attributes
+
+| Attribute | µFlux |
 |---|---|
-| **Execution** | Compiled — source → C → native binary via `cc` |
-| **Typing** | Dynamically typed — cells carry a runtime tag (`int`, `float`, `str`, `ptr`, …) |
-| **Type coercion** | Implicit — arithmetic ops auto-coerce strings to numbers (`"384" 2 +` → 386); explicit `atoi`/`atof`/`itoa`/`ftoa` opcodes available |
-| **Memory** | Garbage collected — precise, non-moving, stop-the-world mark-sweep; scripts never `free` managed objects |
-| **Paradigm** | Stack machine — postfix, no expression syntax, program reads in execution order |
-| **Concurrency** | CSP — bounded channels (`chan`/`enq`/`deq`), `spawn` for detached threads, `weave` for dataflow fanout |
-| **Encodings** | Two: dense (Egyptian-hieroglyph glyphs, one token per op) and text (English mnemonics) |
-| **FFI** | Zero-overhead C import — `import c"fn"(types)->ret`, links directly via `cc` |
-| **Core data ops** | `split`, `find`, `match` (regex), `sort`, `group`, `keys`, `get`/`set` — all built-in, no stdlib imports |
-| **File I/O** | `slurp`, `spit`, `ffold` (streaming reduce), `feach` (streaming per-line), `mmap` (zero-copy) — all core opcodes |
+| Execution | Compiled (µFlux → C → native binary) |
+| Typing | Dynamic and weak |
+| Memory | Garbage collected |
+| Primitives | int, float, str, ptr |
+| Data structures | list, dict, arr, tensor, chan, atom, obj, bitmap, bloom, iter |
+| C Imports | Zero-overhead, no glue |
+| Concurrency | Channels, threads, dataflow DAGs with fanout |
+| Built-ins | Regex, JSON, shell, I/O, streaming |
 
-### Where do these advantages come from?
+### Tokens to write (fewer = cheaper LLM calls)
 
-```
-$ uf '"Hello, dense uFlux!\n"𓂎'
-Hello, dense uFlux!
-$ uf '"Hello, text uFlux!\n" print'
-Hello, text uFlux!
-```
+| | µFlux | C++ | Rust | Python | Node.js |
+|---|---|---|---|---|---|
+| logextract | 332 | 846 | 667 | 329 | 437 |
+| analytics | 348 | 793 | 756 | 366 | 471 |
+| mandelbrot | 175 | 189 | 216 | 163 | 165 |
+| spectralnorm | 442 | 350 | 487 | 258 | 390 |
+| **total** | **1297** | **2178** | **2126** | **1116** | **1463** |
 
-The advantages of µFlux come from sacrificing usability concerns of 
-human author friendliness. µFlux is practically indecipherable when dense encoded.
-Dense encoding is a mode which encodes all features of the language into a set of 
-Egyptian hieroglyphs. The hieroglyphs act as *placeholders* for reserved LLM vocabulary 
-tokens of a given model's choice. In this way, glyph encoding maximally compresses the 
-functions of a modern language into minimal tokens. Note: The hieroglyphs are not 
-designed to be the actual tokens used for a given LLM, but instead are consistent 
-representational placeholders.
+**33% fewer tokens than C++, 32% fewer than Rust** — the languages that match
+its speed. More than Python, but Python is 3–4× slower.
 
-µFlux also provides a more decipherable text encoding with English-based mnemonics. 
-Ultimately LLMs can encode mnemonic op codes in an identical amount of tokens, 
-depending on the choices of their vocabulary, so English mnemonics are  
-usually preferred. Glyphs are provided as a capability for LLM creator's flexibility so as to
-separate µFlux model representations from standard language at the vocab level. English-based 
-mnemonics may overlap existing model representations and cause ambiguity where it isn't desired.
+Token counts use the **Qwen3-0.6B** tokenizer (vocab = 151,643). µFlux dense glyphs are each a single token in this vocab.
 
-### Reading µFlux
+### Speed (seconds, lower = faster)
 
-µFlux is a stack machine. Every value sits on a shared data stack, and every opcode
-consumes values from the top and pushes results back. There is no expression syntax —
-the program is written in the order it executes.
+| | µFlux | C++ | Rust | Python | Node.js |
+|---|---|---|---|---|---|
+| logextract (510 MB) | **1.05** | 0.42 | 0.72 | 3.82 | 3.25 |
+| analytics (512 MB) | **1.19** | 1.05 | 1.82 | 4.09 | 3.66 |
+| mandelbrot | **0.10** | 0.05 | 0.05 | 3.98 | 0.07 |
+| spectralnorm | **1.14** | 1.12 | 1.10 | 136.4 | 1.64 |
+| **total** | **3.48** | **2.64** | **3.69** | **148.3** | **8.62** |
 
-Here is a complete program (text encoding) that runs a shell command, splits the
-output into lines, and prints the count and first line:
+**3.7× faster than Python on data tasks**, within 1.1–2.5× of hand-tuned C++.
 
-```
-"printf 'alpha\\nbeta\\ngamma\\n'" sh drop drop trim "\n" split lines!
-lines@ len "%d lines\n" print drop
-lines@ 0 get "first: %s\n" print drop
-```
-
-Reading the first line left to right:
-
-- `"printf 'alpha\\nbeta\\ngamma\\n'"` — push a string onto the stack.
-- `sh` — execute it as a shell command; pushes exit status, stderr, and stdout.
-- `drop drop` — discard status and stderr, leaving stdout on the stack.
-- `trim` — strip surrounding whitespace from the string.
-- `"\n"` — push a separator string.
-- `split` — cut the string into a list at each separator.
-- `lines!` — store the list into a variable named `lines`.
-
-The `!` suffix stores the top of the stack into a named variable. The `@` suffix
-loads a variable back onto the stack — `lines@` is used in the next two lines.
-In v11, variables are **local** by default (scoped to the current call). Use
-`^name!` / `^name@` for global variables that persist across calls.
-
-That walkthrough covers the execution model. The rest of the language is knowing
-which opcodes exist. There are about 170, each doing one thing. A sample:
-
-| | |
-|---|---|
-| **Containers** | `list`, `arr` (typed array), `dict`, `obj` — all accessed through `get` / `set` / `len` / `keys` / `has` / `del` |
-| **Strings** | `cat`, `split`, `find`, `repl`, `trim`, `match` (regex), `fmt`, `starts` |
-| **Shell / OS** | `sh` (capture), `shp` (streaming), `exec` (argv list, no shell) |
-| **Concurrency** | `chan`, `enq`, `deq`, `spawn` |
-| **I/O** | `print`, `scan`, file read / write |
-| **FFI** | `import c"fn"(types)->ret` |
-
-Control flow uses labels — `name:` defines a jump target, `'name` references it.
-`if` / `while` / `for` take label arguments rather than blocks:
-
-```
-n@ 0 gt 'report 'skip ifelse     ; if n > 0, jump to 'report, else 'skip
-128 'fill for                     ; run 'fill 128 times (index on stack)
-```
-
-Raw jumps (`jmp`, `jz`, `je`) are available when structured forms don't fit.
-
-The full opcode reference is `SPEC.md`.
-
-### Running
+## Quick start
 
 ```sh
 cd comp && cargo build --release
-./comp/target/release/uf examples/hello.uf                         # compile + run
-./comp/target/release/uf -c examples/hello.uf -o hello && ./hello   # produce a binary
+./comp/target/release/uf '"Hello!\n" print'
+cargo install --path comp       # optional: install uf to PATH
 ```
 
-The compiler translates source to C and invokes `cc`. Programs are compiled, not
-interpreted. A garbage collector handles all runtime memory — scripts never call
-`free` on managed objects (raw `malloc` / `free` exist only for FFI buffers).
+## Usage
 
-### Examples
+```sh
+uf '"Hello µFlux!" print'      # run an inline program (cached)
+uf prog.uf                     # compile + run (cached)
+uf -c prog.uf -o hello         # compile to standalone binary
+uf --emit-c prog.uf            # dump the generated C
+uf --to-text prog.uf           # convert dense → text
+uf somedir/                    # directory mode (auto-discovers main + init threads)
+```
 
-| File | |
-|------|-|
-| `examples/hello.uf` | Print a string |
-| `examples/fib.uf` | Iterative Fibonacci (dense) |
-| `examples/shelltest.uf` | Shell commands, streaming pipelines, exec |
+## Example
+
+128×128 matrix multiply, text encoding — no headers, no memory management,
+no imports, no declarations:
+
+```
+fi:  row! 128 'fe for ret
+fe:  col! row@ 128 * col@ + ix!
+     ^A@ ix@ row@ col@ + set
+     ^B@ ix@ row@ col@ - set ret
+cr:  row! 128 'dc for ret
+dc:  col! 0 acc! 128 'ij for
+     ^C@ row@ 128 * col@ + acc@ set ret
+ij:  j! ^A@ row@ 128 * j@ + get
+     ^B@ j@ 128 * col@ + get
+     * acc@ + acc! ret
+entry:
+  16384 arr int ^A! 16384 arr int ^B! 16384 arr int ^C!
+  128 'fi for
+  128 'cr for
+  ...
+```
+
+## Examples
+
+| File | What it shows |
+|------|---------------|
+| `examples/hello.uf` | Minimal print |
+| `examples/fib.uf` | Iterative Fibonacci (dense encoding) |
 | `examples/dot.uf` | Typed arrays, vectorized dot product |
 | `examples/maptest.uf` | Dict operations |
 | `examples/ring.uf` | Channels and `spawn` |
+| `examples/shelltest.uf` | Shell, streaming pipelines, `exec` |
 | `examples/text/matmul.uft` | Matrix multiply (text encoding) |
-| `examples/text/chat.uft` | Multi-user HTTP chat server: concurrency, FFI, SSE streaming |
+| `examples/text/chat.uft` | Multi-user HTTP chat server (concurrency, FFI, SSE) |
 
-### Repository
+## Documentation
 
-```
-comp/      uf compiler (Rust → C → native)
-trans/     C-to-µFlux transpiler, written in µFlux
-examples/  Programs in both encodings
-mods/      FFI binding manifests (.ufm)
-SPEC.md    Language specification
-```
+Full language spec (every opcode, semantics, encoding rules) in
+[`SPEC.md`](SPEC.md). Benchmark details in [`bench/SPEC.md`](bench/SPEC.md).
 
-µFlux is experimental and under active development. The current revision is v10.
+## Status
+
+Experimental, under active development. Current revision: **v11**.

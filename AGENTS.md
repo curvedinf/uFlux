@@ -53,3 +53,4 @@ Key gotchas not to re-derive: raw jumps (`jmp`/`jz`/`je`) are removed — compil
 - Dense glyphs optimized for Qwen3-0.6B tokenizer (single-token per glyph).
 - Transpiler is self-bootstrapped (`gen_trans.py` → `trans.uf` → `trans_bin.c`).
 - Compiler cache key includes its own binary mtime — rebuilding auto-invalidates old cached outputs.
+- **Any change to language semantics, opcodes, encodings, or behavior must be documented in `SPEC.md` in the same changeset.**

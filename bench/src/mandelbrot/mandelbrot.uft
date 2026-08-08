@@ -1,7 +1,7 @@
 ; mandelbrot.uft — counts bounded points in the mandelbrot set
 entry
 1000 n!
-argv len 1 gt 'setn if
+hasargs 'setn if
 0 count!
 n@ 'ybody for
 count@ "%d\n" print
@@ -30,5 +30,5 @@ ibody:
   esc: break ret
 
 setn:
-  argv 1 get atoi n!
+  1 argi n!
   0 ret
