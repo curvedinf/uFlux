@@ -7,13 +7,13 @@ use crate::ast::*;
 pub const DELIM_BASE: u32 = 0x13100;
 pub const TYPE_BASE: u32 = 0x13110;
 
-// Opcode glyphs (187 live ops). Index = OP_NAMES array position.
+// Opcode glyphs (192 live ops). Index = OP_NAMES array position.
 // All colored emoji (U+1F300+), each exactly one Qwen3 token.
 pub const OP_GLYPHS: [u32; 214] = [
     0x1F300, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1F682, 0x1F910,
-    0x1F302, 0x1F602, 0x1F683, 0x1F911, 0x1F303, 0x0, 0x0, 0x0,
-    0x1F603, 0x1F684, 0x1F912, 0x1F304, 0x1F604, 0x1F685, 0x0, 0x1F913,
-    0x0, 0x0, 0x1F305, 0x1F605, 0x1F686, 0x1F914, 0x0, 0x0,
+    0x1F302, 0x1F602, 0x1F683, 0x1F911, 0x1F303, 0x1FA94, 0x1FA91, 0x1FA92,
+    0x1F603, 0x1F684, 0x1F912, 0x1F304, 0x1F604, 0x1F685, 0x1FA90, 0x1F913,
+    0x1FAAB, 0x0, 0x1F305, 0x1F605, 0x1F686, 0x1F914, 0x0, 0x0,
     0x0, 0x1F306, 0x1F606, 0x1F687, 0x1F915, 0x1F307, 0x1F607, 0x0,
     0x1F689, 0x1F916, 0x1F308, 0x1F608, 0x1F68A, 0x1F917, 0x1F309, 0x1F609,
     0x1F68C, 0x1F918, 0x1F30A, 0x1F60A, 0x1F68D, 0x1F919, 0x1F30B, 0x1F60B,
@@ -116,7 +116,7 @@ pub fn glyph_type_id(c: char) -> Option<i64> {
 // compile error (unassigned glyph / unknown identifier).
 pub const OP_NAMES: [&str; 214] = [
     "LIT", "~1", "~2", "~3", "~4", "~5", "ADD", "SUB", "MUL", "AND", "SHR", "INC", "DEC",
-    "~13", "~14", "~15", "FOR", "CALL", "RET", "OBJ", "GET", "SET", "~22", "ARR", "~24", "~25",
+    "POW", "SQRT", "LTE", "FOR", "CALL", "RET", "OBJ", "GET", "SET", "GTE", "ARR", "SHUTDOWN", "~25",
     "CLONE", "CAST", "MACRO", "TENSOR", "~30", "~31", "~32", "SETV", "GETV", "STR", "CAT", "FMT",
     "BUF", "~39", "BUFCOPY", "ADDR", "LOADX", "STOREX", "SIZEOF", "OFFSET", "STRUCT", "MALLOC",
     "FREE", "SYS", "GC", "IMPORT", "EXPORT", "EXTERN", "PRINT", "SCAN",
@@ -172,6 +172,11 @@ pub fn op_usage(name: &str) -> &'static str {
         "SHR" => "a → a>>1",
         "INC" => "a → a+1",
         "DEC" => "a → a-1",
+        "POW" => "a b → a^b | C/Python pow",
+        "SQRT" => "a → √a",
+        "LTE" => "a b → 0/1 | a<=b",
+        "GTE" => "a b → 0/1 | a>=b",
+        "SHUTDOWN" => "→ | graceful weave shutdown (drains and exits)",
         "FOR" => "count body_addr → | pushes index k per iter",
         "CALL" => "(label operand) | call subroutine",
         "RET" => "→ | return from call",
@@ -370,15 +375,14 @@ pub fn type_id(kw: &str) -> Option<i64> {
 pub struct Lexer {
     chars: Vec<char>,
     pos: usize,
-    // lookback state for the '-' sign/SUB disambiguation rule: true iff the
-    // previous token pushed a value (number, string, GETV/@, type id,
-    // ADDR/', or the value-leaving ops IDX/LOADX)
-    pushed: bool,
+    // v13: true when the previous token was RET — a number directly after
+    // `ret` is the return operand, never a weave worker count
+    prev_ret: bool,
 }
 
 impl Lexer {
     fn new(src: &str) -> Self {
-        Lexer { chars: src.chars().collect(), pos: 0, pushed: false }
+        Lexer { chars: src.chars().collect(), pos: 0, prev_ret: false }
     }
     fn peek(&self) -> Option<char> {
         self.chars.get(self.pos).copied()
@@ -552,7 +556,8 @@ impl Lexer {
         self.lex_into(&mut out, 0);
         out
     }
-    // lex until EOF (stop=0), until matching '}' (1), or until the ENDT glyph (2)
+    // lex until EOF (stop=0), until matching '}' (1), until ']' (3),
+    // until the TASK or WRUN glyph (5, not consumed)
     fn lex_into(&mut self, out: &mut Vec<Tok>, stop: u8) {
         loop {
             self.skip_ws();
@@ -568,25 +573,48 @@ impl Lexer {
             let cp = c as u32;
             if cp >= DELIM_BASE && cp <= DELIM_BASE + 8 {
                 self.pos += 1;
-                continue; // delimiters are invisible; lookback state unchanged
+                continue; // delimiters are invisible
             }
             if stop == 1 && c == '}' {
                 self.pos += 1;
                 return;
             }
-            if stop == 2 && opcode_index(c) == Some(83) {
-                // ENDT ends a task body
+            if stop == 3 && c == ']' {
                 self.pos += 1;
                 return;
             }
+            if stop == 5 && (opcode_index(c) == Some(82) || opcode_index(c) == Some(84)) {
+                // TASK/WRUN glyphs bound a weave task body; leave them unconsumed
+                return;
+            }
+            if stop == 5 && is_l(cp) && !self.prev_ret {
+                // an l-run directly before the TASK glyph is the next task's
+                // fanout worker count — leave it unconsumed
+                let mut j = self.pos;
+                while let Some(c2) = self.chars.get(j) {
+                    let c2p = *c2 as u32;
+                    if is_l(c2p) {
+                        j += 1;
+                    } else {
+                        break;
+                    }
+                }
+                while self.chars.get(j).map_or(false, |c2| c2.is_whitespace()) {
+                    j += 1;
+                }
+                if self.chars.get(j).map_or(false, |c2| opcode_index(*c2) == Some(82)) {
+                    return;
+                }
+            }
             // ---- l-space: self-evaluating base-64 number ----
             if is_l(cp) {
+                self.prev_ret = false;
                 out.push(self.lex_lnumber(false));
-                self.pushed = true;
                 continue;
             }
             // ---- ^ prefix: global variable (^x! / ^x@) ----
             if c == '^' {
+                self.prev_ret = false;
                 self.pos += 1;
                 self.skip_ws();
                 let c2 = match self.peek() {
@@ -602,11 +630,9 @@ impl Lexer {
                     if g == Some('!') || g.map_or(false, |c| opcode_index(c) == Some(33)) {
                         self.pos += 1;
                         out.push(Tok::SetV(name));
-                        self.pushed = false;
                     } else if g == Some('@') || g.map_or(false, |c| opcode_index(c) == Some(34)) {
                         self.pos += 1;
                         out.push(Tok::GetV(name));
-                        self.pushed = true;
                     } else {
                         self.err("^ needs ! or @ after the name");
                     }
@@ -623,11 +649,9 @@ impl Lexer {
                     if g == Some('!') || g.map_or(false, |c| opcode_index(c) == Some(33)) {
                         self.pos += 1;
                         out.push(Tok::SetV(name));
-                        self.pushed = false;
                     } else if g == Some('@') || g.map_or(false, |c| opcode_index(c) == Some(34)) {
                         self.pos += 1;
                         out.push(Tok::GetV(name));
-                        self.pushed = true;
                     } else {
                         self.err("^ needs ! or @ after the name");
                     }
@@ -637,6 +661,7 @@ impl Lexer {
             }
             // ---- v-space: variable use or label definition ----
             if is_v(cp) {
+                self.prev_ret = false;
                 // fold a run of v-glyphs into one name
                 let name = self.fold_slots();
                 self.skip_ws();
@@ -644,14 +669,11 @@ impl Lexer {
                 if g == Some('!') || g.map_or(false, |c| opcode_index(c) == Some(33)) {
                     self.pos += 1;
                     out.push(Tok::LocalSet(name));
-                    self.pushed = false;
                 } else if g == Some('@') || g.map_or(false, |c| opcode_index(c) == Some(34)) {
                     self.pos += 1;
                     out.push(Tok::LocalGet(name));
-                    self.pushed = true;
                 } else {
                     out.push(Tok::LabelDef(name));
-                    self.pushed = false;
                 }
                 continue;
             }
@@ -662,82 +684,97 @@ impl Lexer {
                 0x130BD => self.err("je removed — use if/ifelse"),
                 _ => {}
             }
-            // ---- ASCII operator tokens ----
+            // ---- ASCII tokens ----
             match c {
-                '+' => {
+                '[' => {
                     self.pos += 1;
-                    out.push(Tok::Op("ADD"));
-                    self.pushed = true; // value-leaving op (matches the ADD glyph)
+                    let mut body = Vec::new();
+                    self.lex_into(&mut body, 3);
+                    out.push(Tok::List(body));
                     continue;
                 }
-                '*' => {
+                '{' => {
                     self.pos += 1;
-                    out.push(Tok::Op("MUL"));
-                    self.pushed = true;
+                    let mut body = Vec::new();
+                    self.lex_into(&mut body, 1);
+                    out.push(Tok::Dict(body));
                     continue;
-                }
-                '&' => {
-                    self.pos += 1;
-                    out.push(Tok::Op("AND"));
-                    self.pushed = true;
-                    continue;
-                }
-                '=' => {
-                    self.err("= (je) removed — use if/ifelse");
                 }
                 '\'' => {
                     // ADDR: '<label> (v-run or ASCII)
+                    self.prev_ret = false;
                     self.pos += 1;
                     self.skip_ws();
                     let label = self.jump_label("ADDR");
                     out.push(Tok::Jump("ADDR", label));
-                    self.pushed = true;
                     continue;
+                }
+                '+' => self.err("'+' removed in v13 — use `add`"),
+                '*' => self.err("'*' removed in v13 — use `mul`"),
+                '&' => self.err("'&' removed in v13 — use `and`"),
+                '=' => {
+                    self.err("= (je) removed — use if/ifelse");
                 }
                 '"' => {
                     // bare string self-evaluates (PushS)
+                    self.prev_ret = false;
                     out.push(Tok::PushS(self.lex_string()));
-                    self.pushed = true;
                     continue;
                 }
                 '-' => {
+                    // v13: '-' is only part of a number literal — always a sign
                     self.pos += 1;
-                    if self.pushed {
-                        // previous token pushed a value: this is SUB
-                        out.push(Tok::Op("SUB"));
-                        self.pushed = false;
-                    } else {
-                        // sign position: only a negative l-number may follow
-                        self.skip_ws();
-                        match self.peek() {
-                            Some(g) if is_l(g as u32) => {
-                                out.push(self.lex_lnumber(true));
-                                self.pushed = true;
-                            }
-                            _ => self.err("stray '-' (SUB needs a value-pushing token before it; sign needs an l-run after it)"),
+                    self.skip_ws();
+                    match self.peek() {
+                        Some(g) if is_l(g as u32) => {
+                            out.push(self.lex_lnumber(true));
                         }
+                        _ => self.err("stray '-' (v13 has no SUB symbol — use `sub`; a sign needs an l-run after it)"),
                     }
                     continue;
                 }
-                '.' => self.err("stray '.' (only valid between l-runs in a number)"),
-                '@' | '!' => self.err("bare '@'/'!' must directly follow a v-run"),
+                '@' => {
+                    // dense-mode sentinel idents (@objsize:Name, @cast:Name,
+                    // @sizeof:Name, @offset:Name.field) — the `_obj`-style
+                    // immediate ops read a struct name and the emitter writes
+                    // it back as a @-sentinel
+                    self.pos += 1;
+                    let mut word = String::new();
+                    while let Some(c2) = self.peek() {
+                        if c2.is_ascii_alphabetic() || c2 == ':' || c2 == '.' {
+                            word.push(c2);
+                            self.pos += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    if word.starts_with("objsize:") || word.starts_with("cast:")
+                        || word.starts_with("sizeof:") || word.starts_with("offset:")
+                    {
+                        out.push(Tok::Ident(format!("@{}", word)));
+                        continue;
+                    }
+                    self.err("bare '@' must directly follow a v-run or start a sentinel");
+                }
+                '!' => self.err("bare '!' must directly follow a v-run"),
                 _ => {}
             }
             // ---- bare type glyph: pushes the type id ----
             if let Some(id) = glyph_type_id(c) {
-                // (also valid after LIT and after type-expecting opcodes, handled in lex_op)
+                self.prev_ret = false;
                 self.pos += 1;
                 out.push(Tok::PushI(id));
-                self.pushed = true;
                 continue;
             }
             // ---- opcode glyphs (custom table + legacy aliases) ----
             if let Some(idx) = opcode_index(c) {
                 self.pos += 1;
+                self.prev_ret = idx == 18; // RET glyph
                 self.lex_op(idx, out);
                 continue;
             }
             if c.is_ascii_alphabetic() || c == '_' {
+                self.prev_ret = false;
                 let name = self.lex_ident();
                 if is_bad_ident(&name) {
                     self.err(&format!("identifier '{}' — identifiers may not start with '_'", name));
@@ -745,7 +782,6 @@ impl Lexer {
                 if name == "_" && (self.peek() == Some('!') || self.peek().map_or(false, |c| opcode_index(c) == Some(33))) {
                     self.pos += 1;
                     out.push(Tok::Discard);
-                    self.pushed = false;
                     continue;
                 }
                 if self.peek() == Some(':') {
@@ -754,7 +790,6 @@ impl Lexer {
                 } else {
                     out.push(Tok::Ident(name));
                 }
-                self.pushed = false;
                 continue;
             }
             if opcode_index(c).is_some() || is_v(cp) || is_l(cp) {
@@ -783,36 +818,7 @@ impl Lexer {
     }
 
     fn lex_op(&mut self, idx: usize, out: &mut Vec<Tok>) {
-        let name = OP_NAMES[idx];
         self.lex_op_inner(idx, out);
-        // lookback update: literals/strings and every value-leaving opcode
-        // count as "pushed a value"; purely consuming/structural ops do not
-        self.pushed = matches!(
-            name,
-            "LIT" | "STR" | "ADD" | "SUB" | "MUL" | "AND" | "SHR"
-                | "INC" | "DEC" | "GET" | "GETQ" | "HAS" | "CLONE" | "CAST" | "ARR" | "TENSOR" | "OBJ"
-                | "CAT" | "FMT" | "BUF" | "MALLOC" | "LOADX" | "SIZEOF" | "OFFSET" | "PRINT"
-                | "SCAN" | "CALL" | "SYS" | "DICT" | "KEYS" | "LIST"
-                | "PUSH" | "POP" | "CHAN" | "DEQ" | "ATOM" | "AGET" | "AADD" | "CAS"
-                | "TYPEOF" | "LEN"
-                | "SH" | "SHP" | "EXEC"
-                | "MATCH" | "REPLACE" | "RSPLIT" | "GLOB" | "SPLIT" | "JOIN" | "SLICE"
-                | "FIND" | "REPL" | "TRIM" | "UP" | "DOWN" | "STARTS" | "ENDS"
-                | "DIV" | "REM" | "EQ" | "LT" | "GT" | "NOT" | "OR" | "XOR" | "SHL" | "BNOT"
-                | "ORELSE" | "RANGE" | "SORT" | "FILTER" | "SOME" | "EVERY"
-                | "VADD" | "VSUB" | "VMUL" | "VDIV" | "VEADD" | "VESUB" | "VEMUL" | "VEDIV"
-                | "VEMAX" | "VEMIN" | "VEQ" | "VLT" | "VGT" | "VGE" | "VLE" | "VAND" | "VOR"
-                | "VNOT" | "VCOUNT" | "VGATHER" | "VSUM" | "VMEAN" | "VMIN" | "VMAX"
-                | "VMAP" | "VFOLD" | "VARGSORT" | "VSEARCHSORTED" | "VWHERE"
-                | "NOW" | "TIME" | "TIMEF" | "BLOOM" | "BTEST" | "SLURP" | "ARGV"
-                | "GROUP" | "AGG" | "UNIQUE" | "FLAT" | "CHUNK"
-                | "MMAP" | "FFOLD" | "FSPLIT" | "FGET" | "FATOI" | "FATOF" | "FSGET" | "FBYTE" | "FMATCH" | "BFS" | "DFS" | "WFIND"
-                | "ADDTO" | "FADDTO" | "FINC"
-                | "VGET" | "VSET"
-                | "JSON" | "UNJSON" | "ITER" | "NEXT" | "COLLECT" | "IMAP" | "IFILTER"
-                | "FEMIT" | "TRY" | "RETRY" | "SPAWN"
-                | "ATOI" | "ATOF" | "ITOA" | "FTOA"
-        );
     }
 
     fn lex_op_inner(&mut self, idx: usize, out: &mut Vec<Tok>) {
@@ -946,51 +952,53 @@ impl Lexer {
                 out.push(Tok::Pub);
             }
             "WEAVE" => {
-                // compile-time task scope: (input v-runs)* [count l-run] <name v-run> TASK body ENDT
-                // repeated until the WRUN glyph
+                // v13: [count l-run] TASK <name v-run> [':'] body, repeated until
+                // the RUN glyph. The task body lexes until the next TASK or RUN
+                // glyph; its leading param bindings (v-run + '!') are the task's
+                // input bindings, extracted by the parser.
                 loop {
                     self.skip_ws();
                     match self.peek() {
                         Some(g) if opcode_index(g) == Some(84) => {
                             self.pos += 1;
-                            out.push(Tok::Wrun);
+                            let terminal = match self.peek() {
+                                Some(g2) if is_v(g2 as u32) => {
+                                    let t = self.fold_slots();
+                                    self.skip_ws();
+                                    Some(t)
+                                }
+                                _ => None,
+                            };
+                            out.push(Tok::Wrun(terminal));
                             break;
                         }
-                        Some(g) if is_v(g as u32) || is_l(g as u32)
-                            || opcode_index(g) == Some(82) =>
-                        {
-                            let mut runs = Vec::new();
+                        Some(g) if is_l(g as u32) || opcode_index(g) == Some(82) => {
                             let mut count: Option<i64> = None;
-                            loop {
-                                match self.peek() {
-                                    Some(g2) if is_v(g2 as u32) => {
-                                        runs.push(self.fold_slots());
-                                        self.skip_ws();
-                                    }
-                                    Some(g2) if is_l(g2 as u32) => {
-                                        if count.is_some() {
-                                            self.err("WEAVE: more than one worker count");
-                                        }
-                                        count = Some(self.lrun_u64() as i64);
-                                        self.skip_ws();
-                                    }
-                                    _ => break,
+                            if let Some(g2) = self.peek() {
+                                if is_l(g2 as u32) {
+                                    count = Some(self.lrun_u64() as i64);
+                                    self.skip_ws();
                                 }
                             }
                             match self.peek() {
-                                Some(g) if opcode_index(g) == Some(82) => self.pos += 1,
-                                _ => self.err("WEAVE: expected TASK glyph after task inputs"),
+                                Some(g2) if opcode_index(g2) == Some(82) => self.pos += 1,
+                                _ => self.err("WEAVE: expected TASK glyph after worker count"),
                             }
                             self.skip_ws();
                             let name = match self.peek() {
-                                Some(g) if is_v(g as u32) => self.fold_slots(),
+                                Some(g2) if is_v(g2 as u32) => self.fold_slots(),
                                 _ => self.err("WEAVE: task needs a name"),
                             };
+                            self.skip_ws();
+                            if self.peek() == Some(':') {
+                                self.pos += 1;
+                                self.skip_ws();
+                            }
                             let mut body = Vec::new();
-                            self.lex_into(&mut body, 2);
-                            out.push(Tok::Task { name, inputs: runs, count, body });
+                            self.lex_into(&mut body, 5);
+                            out.push(Tok::Task { name, count, body });
                         }
-                        _ => self.err("WEAVE: expected task name or WRUN"),
+                        _ => self.err("WEAVE: expected task name or RUN"),
                     }
                 }
             }
@@ -1152,67 +1160,69 @@ impl Lexer {
 // The dense lookback rule is a dense-only artifact: in text mode "-" alone is
 // SUB and "-5" is a number, because tokens are space-delimited.
 
-// text mnemonic for each opcode index (normative, SPEC_v10_proposal.md).
-// Retired slots return "~NN" which never matches a source token.
+// text mnemonic for each opcode index (normative, SPEC_v13_proposal.md).
+// Retired slots return "~retired" which never matches a source token.
 pub fn text_mnemonic(idx: usize) -> &'static str {
     match OP_NAMES[idx] {
         "LIT" => "_lit", "~1" | "~2" | "~3" | "~4" | "~5" => "~retired",
         "ADD" => "add", "SUB" => "sub", "MUL" => "mul", "AND" => "and",
         "SHR" => "shr", "INC" => "inc", "DEC" => "dec",
+        "POW" => "pow", "SQRT" => "sqrt", "LTE" => "lte", "GTE" => "gte",
+        "SHUTDOWN" => "shutdown",
         "FOR" => "for", "CALL" => "_call", "RET" => "ret", "OBJ" => "_obj",
-        "GET" => "get", "SET" => "set", "ARR" => "_arr", "CLONE" => "clone", "CAST" => "_cast",
-        "MACRO" => "macro", "TENSOR" => "_tensor", "SETV" => "setv", "GETV" => "getv",
-        "STR" => "_str", "CAT" => "cat", "FMT" => "fmt", "BUF" => "buf", "BUFCOPY" => "bufcopy",
-        "ADDR" => "_addr", "LOADX" => "loadx", "STOREX" => "storex", "SIZEOF" => "_sizeof",
+        "GET" => "get", "SET" => "set", "ARR" => "array", "CLONE" => "copy", "CAST" => "_cast",
+        "MACRO" => "macro", "TENSOR" => "tensor", "SETV" => "setv", "GETV" => "getv",
+        "STR" => "_str", "CAT" => "concat", "FMT" => "format", "BUF" => "buffer", "BUFCOPY" => "copy_memory",
+        "ADDR" => "_addr", "LOADX" => "load", "STOREX" => "store", "SIZEOF" => "_size_of",
         "OFFSET" => "_offset", "STRUCT" => "struct", "MALLOC" => "malloc", "FREE" => "free",
-        "SYS" => "_sys", "GC" => "gc", "IMPORT" => "import", "EXPORT" => "export",
+        "SYS" => "_syscall", "GC" => "gc", "IMPORT" => "import", "EXPORT" => "export",
         "EXTERN" => "extern", "PRINT" => "print", "SCAN" => "scan",
-        "DICT" => "dict", "LIST" => "list", "PUSH" => "push", "POP" => "pop", "CHAN" => "chan",
-        "ENQ" => "enq", "DEQ" => "deq", "CLOSE" => "close", "ATOM" => "atom", "AGET" => "aget",
-        "ASET" => "aset", "AADD" => "aadd", "CAS" => "cas", "TYPEOF" => "typeof", "LEN" => "len",
+        "DICT" => "dict", "LIST" => "list", "PUSH" => "append", "POP" => "pop", "CHAN" => "channel",
+        "ENQ" => "enqueue", "DEQ" => "dequeue", "CLOSE" => "close", "ATOM" => "atomic", "AGET" => "atomic_get",
+        "ASET" => "atomic_set", "AADD" => "atomic_add", "CAS" => "cas", "TYPEOF" => "type_of", "LEN" => "length",
         "USE" => "use", "MOD" => "mod", "PUB" => "pub", "WEAVE" => "weave", "TASK" => "task",
-        "ENDT" => "endt", "WRUN" => "wrun",
-        "SH" => "sh", "SHP" => "shp", "EXEC" => "exec",
-        "MATCH" => "match", "REPLACE" => "replace", "RSPLIT" => "rsplit", "GLOB" => "glob",
+        "ENDT" => "~retired", "WRUN" => "run",
+        "SH" => "shell", "SHP" => "shell_stream", "EXEC" => "execute",
+        "MATCH" => "regex_match", "REPLACE" => "regex_replace", "RSPLIT" => "regex_split", "GLOB" => "glob_match",
         "SPLIT" => "split", "JOIN" => "join", "SLICE" => "slice", "FIND" => "find",
-        "REPL" => "repl", "TRIM" => "trim", "UP" => "up", "DOWN" => "down",
-        "STARTS" => "starts", "ENDS" => "ends",
+        "REPL" => "replace_all", "TRIM" => "trim", "UP" => "uppercase", "DOWN" => "lowercase",
+        "STARTS" => "starts_with", "ENDS" => "ends_with",
         // v10: arithmetic & logic
         "DIV" => "div", "REM" => "rem", "EQ" => "eq", "LT" => "lt", "GT" => "gt",
         "NOT" => "not", "OR" => "or", "XOR" => "xor", "SHL" => "shl", "BNOT" => "bnot",
         // v10: structured control flow
-        "IF" => "if", "IFELSE" => "ifelse", "WHILE" => "while", "BREAK" => "break", "CONT" => "cont",
+        "IF" => "if", "IFELSE" => "if_else", "WHILE" => "while", "BREAK" => "break", "CONT" => "continue",
         // v10: container protocol & sequences
-        "GETQ" => "getq", "HAS" => "has", "ORELSE" => "orelse", "KEYS" => "keys",
-        "RANGE" => "range", "SORT" => "sort", "FILTER" => "filter", "SOME" => "some", "EVERY" => "every",
+        "GETQ" => "get_or_zero", "HAS" => "contains", "ORELSE" => "orelse", "KEYS" => "keys",
+        "RANGE" => "range", "SORT" => "sort", "FILTER" => "filter", "SOME" => "any", "EVERY" => "all",
         // v10: vector ops
-        "VADD" => "vadd", "VSUB" => "vsub", "VMUL" => "vmul", "VDIV" => "vdiv",
-        "VEADD" => "veadd", "VESUB" => "vesub", "VEMUL" => "vemul", "VEDIV" => "vediv",
-        "VEMAX" => "vemax", "VEMIN" => "vemin",
-        "VEQ" => "veq", "VLT" => "vlt", "VGT" => "vgt", "VGE" => "vge", "VLE" => "vle",
-        "VAND" => "vand", "VOR" => "vor", "VNOT" => "vnot", "VCOUNT" => "vcount",
-        "VGATHER" => "vgather", "VSUM" => "vsum", "VMEAN" => "vmean", "VMIN" => "vmin",
-        "VMAX" => "vmax", "DEL" => "del", "VMAP" => "vmap", "VFOLD" => "vfold",
+        "VADD" => "scalar_add", "VSUB" => "scalar_sub", "VMUL" => "scalar_mul", "VDIV" => "scalar_div",
+        "VEADD" => "array_add", "VESUB" => "array_sub", "VEMUL" => "array_mul", "VEDIV" => "array_div",
+        "VEMAX" => "array_max", "VEMIN" => "array_min",
+        "VEQ" => "scalar_eq", "VLT" => "scalar_lt", "VGT" => "scalar_gt", "VGE" => "scalar_gte", "VLE" => "scalar_lte",
+        "VAND" => "bitmap_and", "VOR" => "bitmap_or", "VNOT" => "bitmap_not", "VCOUNT" => "bitmap_count",
+        "VGATHER" => "array_gather", "VSUM" => "sum", "VMEAN" => "mean", "VMIN" => "min",
+        "VMAX" => "max", "DEL" => "remove", "VMAP" => "array_map", "VFOLD" => "array_reduce",
         // v10: time, bloom, script I/O
-        "NOW" => "now", "TIME" => "time", "TIMEF" => "timef",
-        "BLOOM" => "bloom", "BADD" => "badd", "BTEST" => "btest",
-        "SLURP" => "slurp", "SPIT" => "spit", "ARGV" => "argv",
+        "NOW" => "now", "TIME" => "parse_time", "TIMEF" => "format_time",
+        "BLOOM" => "bloom", "BADD" => "bloom_add", "BTEST" => "bloom_test",
+        "SLURP" => "read_file", "SPIT" => "write_file", "ARGV" => "argv",
         // v10: additional data ops
-        "GROUP" => "group", "AGG" => "agg", "UNIQUE" => "unique", "FLAT" => "flat",
-        "CHUNK" => "chunk", "VARGSORT" => "vargsort", "VSEARCHSORTED" => "vsearchsorted",
-        "VWHERE" => "vwhere",
+        "GROUP" => "group_by", "AGG" => "aggregate", "UNIQUE" => "unique", "FLAT" => "flatten",
+        "CHUNK" => "chunk", "VARGSORT" => "array_argsort", "VSEARCHSORTED" => "array_search_sorted",
+        "VWHERE" => "array_where",
         // v10: large-data shortcuts
-        "MMAP" => "mmap", "FEACH" => "feach", "FFOLD" => "ffold", "FSPLIT" => "fsplit", "FGET" => "fget", "FATOI" => "fatoi", "FATOF" => "fatof", "FSGET" => "fsget", "FBYTE" => "fbyte", "VGET" => "vget", "VSET" => "vset", "ADDTO" => "addto", "FADDTO" => "faddto", "FINC" => "finc", "FMATCH" => "fmatch",
-        "BFS" => "bfs", "DFS" => "dfs", "WFIND" => "wfind",
+        "MMAP" => "mmap", "FEACH" => "file_each_line", "FFOLD" => "file_fold_lines", "FSPLIT" => "file_split_lines", "FGET" => "field_get", "FATOI" => "field_int", "FATOF" => "field_float", "FSGET" => "field_slice", "FBYTE" => "field_byte", "VGET" => "array_get", "VSET" => "array_set", "ADDTO" => "add_to", "FADDTO" => "field_add_to", "FINC" => "field_inc", "FMATCH" => "file_match_lines",
+        "BFS" => "bfs", "DFS" => "dfs", "WFIND" => "find_first",
         // v10: JSON, iterators, sinks, containment, threads
-        "JSON" => "json", "UNJSON" => "unjson", "ITER" => "iter", "NEXT" => "next",
-        "COLLECT" => "collect", "IMAP" => "imap", "IFILTER" => "ifilter", "FEMIT" => "femit",
+        "JSON" => "parse_json", "UNJSON" => "to_json", "ITER" => "iter", "NEXT" => "next",
+        "COLLECT" => "collect", "IMAP" => "iter_map", "IFILTER" => "iter_filter", "FEMIT" => "file_emit",
         "TRY" => "try", "RETRY" => "retry", "SPAWN" => "spawn",
-        "ATOI" => "atoi", "ATOF" => "atof", "ITOA" => "itoa", "FTOA" => "ftoa",
+        "ATOI" => "parse_int", "ATOF" => "parse_float", "ITOA" => "format_int", "FTOA" => "format_float",
         "ENTRY" => "entry",
-        "HASARGS" => "hasargs", "ARGI" => "argi", "SORTKEYS" => "sortkeys", "TOPN" => "topn",
-        "RANGEFOLD" => "rangefold",
-        "SEQ" => "seq", "SNE" => "sne",
+        "HASARGS" => "has_args", "ARGI" => "arg_index", "SORTKEYS" => "sort_keys", "TOPN" => "top_n",
+        "RANGEFOLD" => "range_reduce",
+        "SEQ" => "structural_equal", "SNE" => "structural_not_equal",
         other => other, // "~NN" retired placeholders: never a valid source token
     }
 }
@@ -1277,13 +1287,13 @@ pub fn text_tokens(src: &str) -> Vec<String> {
             v.push(s);
             continue;
         }
-        if c == '{' || c == '}' {
+        if c == '{' || c == '}' || c == '[' || c == ']' {
             v.push(c.to_string());
             i += 1;
             continue;
         }
         let mut s = String::new();
-        while i < chars.len() && !chars[i].is_whitespace() && chars[i] != '{' && chars[i] != '}' && chars[i] != ';' {
+        while i < chars.len() && !chars[i].is_whitespace() && chars[i] != '{' && chars[i] != '}' && chars[i] != '[' && chars[i] != ']' && chars[i] != ';' {
             s.push(chars[i]);
             i += 1;
         }
@@ -1352,6 +1362,8 @@ pub fn parse_text_num(tok: &str) -> Option<Tok> {
 pub struct TextLexer {
     toks: Vec<String>,
     pos: usize,
+    // v13: true when the previous token was a bare `ret`
+    prev_ret: bool,
 }
 
 impl TextLexer {
@@ -1373,7 +1385,7 @@ impl TextLexer {
         check_ident(&t, what);
         t
     }
-    // stop: 0 = eof, 1 = '}', 2 = "endt"
+    // stop: 0 = eof, 1 = '}', 3 = ']', 5 = "task"/"run" (weave body end)
     fn run(&mut self, out: &mut Vec<Tok>, stop: u8) {
         loop {
             let tok = match self.peek() {
@@ -1389,9 +1401,33 @@ impl TextLexer {
                 self.pos += 1;
                 return;
             }
-            if tok == "endt" && stop == 2 {
+            if tok == "]" && stop == 3 {
                 self.pos += 1;
                 return;
+            }
+            if stop == 5 && (tok == "task" || tok == "run") {
+                // TASK/RUN bound a weave task body; leave them unconsumed
+                return;
+            }
+            if stop == 5 && !self.prev_ret && parse_text_num(&tok).is_some()
+                && self.toks.get(self.pos + 1).map(|t| t.as_str() == "task").unwrap_or(false) {
+                // a numeric literal directly before `task` is the next task's
+                // fanout worker count — leave it unconsumed
+                return;
+            }
+            if tok == "[" {
+                self.pos += 1;
+                let mut body = Vec::new();
+                self.run(&mut body, 3);
+                out.push(Tok::List(body));
+                continue;
+            }
+            if tok == "{" {
+                self.pos += 1;
+                let mut body = Vec::new();
+                self.run(&mut body, 1);
+                out.push(Tok::Dict(body));
+                continue;
             }
             if let Some(s) = unquote(&tok) {
                 self.pos += 1;
@@ -1490,14 +1526,15 @@ impl TextLexer {
                     continue;
                 }
             }
+            self.prev_ret = tok == "ret";
             self.pos += 1;
             match tok.as_str() {
-                "{" => self.err("stray '{'"),
-                "}" => self.err("stray '}'"),
-                "+" => out.push(Tok::Op("ADD")),
-                "-" => out.push(Tok::Op("SUB")),
-                "*" => out.push(Tok::Op("MUL")),
-                "&" => out.push(Tok::Op("AND")),
+                "{" | "}" => self.err("stray '{'/'}'"),
+                "[" | "]" => self.err("stray '['/']'"),
+                "+" => self.err("'+' removed in v13 — use `add`"),
+                "-" => self.err("'-' removed in v13 — use `sub` (negative numbers still parse)"),
+                "*" => self.err("'*' removed in v13 — use `mul`"),
+                "&" => self.err("'&' removed in v13 — use `and`"),
                 "=" => self.err("= (je) removed — use if/ifelse"),
                 "pub" => out.push(Tok::Pub),
                 "use" | "export" | "extern" | "mod" => {
@@ -1550,44 +1587,55 @@ impl TextLexer {
                 "weave" => {
                     loop {
                         match self.peek() {
-                            Some("wrun") => {
+                            Some("run") => {
                                 self.pos += 1;
-                                out.push(Tok::Wrun);
+                                // optional terminal task name after `run`
+                                let terminal = match self.peek() {
+                                    Some(t) if !is_reserved(t) && !is_bad_ident(t)
+                                        && !t.ends_with(':') && !t.ends_with('!') && !t.ends_with('@')
+                                        && parse_text_num(t).is_none() && unquote(t).is_none()
+                                        && !t.starts_with('\'') => {
+                                        let t = self.next().unwrap();
+                                        check_ident(&t, "run terminal");
+                                        Some(t)
+                                    }
+                                    _ => None,
+                                };
+                                out.push(Tok::Wrun(terminal));
                                 break;
                             }
                             Some(_) => {
-                                let mut runs = Vec::new();
                                 let mut count: Option<i64> = None;
-                                while let Some(t) = self.peek() {
-                                    if t == "task" || t == "wrun" {
-                                        break;
-                                    }
-                                    let t = self.next().unwrap();
-                                    check_ident(&t, "weave input");
-                                    // a numeric literal in input position is the
-                                    // fanout worker count (1..64, checked later)
-                                    if let Some(Tok::PushI(v)) = parse_text_num(&t) {
-                                        if count.is_some() {
-                                            self.err("weave: more than one worker count");
+                                // optional worker count before 'task'
+                                if let Some(t) = self.peek() {
+                                    if let Some(Tok::PushI(v)) = parse_text_num(t) {
+                                        if v > 0 {
+                                            count = Some(v);
+                                            self.pos += 1;
                                         }
-                                        count = Some(v);
-                                        continue;
                                     }
-                                    runs.push(t);
                                 }
                                 if self.next().as_deref() != Some("task") {
-                                    self.err("weave: expected 'task' after task inputs");
+                                    self.err("weave: expected 'task' (or 'run')");
                                 }
-                                let name = self.name_token("task");
+                                // task name, with optional trailing ':'
+                                let mut name = self.name_token("task");
+                                if name.ends_with(':') {
+                                    name = name.trim_end_matches(':').to_string();
+                                }
+                                if self.peek() == Some(":") {
+                                    self.pos += 1;
+                                }
                                 let mut body = Vec::new();
-                                self.run(&mut body, 2);
-                                out.push(Tok::Task { name, inputs: runs, count, body });
+                                self.run(&mut body, 5);
+                                out.push(Tok::Task { name, count, body });
                             }
-                            None => self.err("weave: unterminated (missing wrun)"),
+                            None => self.err("weave: unterminated (missing run)"),
                         }
                     }
                 }
-                "task" | "endt" | "wrun" => self.err("task/endt/wrun only valid inside weave..wrun"),
+                "task" | "run" => self.err("task/run only valid inside weave..run"),
+                "endt" => self.err("endt removed in v13 — task bodies end with `ret`"),
                 "_lit" => {
                     let n = self.next().unwrap_or_else(|| self.err("lit needs an operand"));
                     if let Some(id) = type_id(&n) {
@@ -1612,7 +1660,7 @@ impl TextLexer {
                     let l = self.name_token("addr");
                     out.push(Tok::Jump("ADDR", l));
                 }
-                "_sys" => {
+                "_syscall" => {
                     let n = match self.peek() {
                         Some(t) => t.parse::<usize>().ok(),
                         None => None,
@@ -1624,7 +1672,7 @@ impl TextLexer {
                         out.push(Tok::Sys(0));
                     }
                 }
-                "_sizeof" => {
+                "_size_of" => {
                     match self.peek() {
                         Some(t) if type_id(t).is_some() => {
                             let id = type_id(self.next().unwrap().as_str()).unwrap();
@@ -1632,7 +1680,7 @@ impl TextLexer {
                             out.push(Tok::Op("SIZEOF"));
                         }
                         Some(_) => {
-                            let sym = self.name_token("sizeof");
+                            let sym = self.name_token("size_of");
                             out.push(Tok::Ident(format!("@sizeof:{}", sym)));
                         }
                         None => out.push(Tok::Op("SIZEOF")),
@@ -1647,11 +1695,11 @@ impl TextLexer {
                         self.err("offset needs Struct.field");
                     }
                 }
-                "_obj" | "_cast" | "_arr" | "_tensor" => {
+                "_obj" | "_cast" | "_array" | "_tensor" => {
                     let name = match tok.as_str() {
                         "_obj" => "OBJ",
                         "_cast" => "CAST",
-                        "_arr" => "ARR",
+                        "_array" => "ARR",
                         _ => "TENSOR",
                     };
                     // v12: ARR/TENSOR take [len, type]; type immediate lands on top
@@ -1685,13 +1733,18 @@ impl TextLexer {
                 }
                 "setv" | "getv" => self.err("use name! / name@ for variables"),
                 // backward-compat: old immediate-op names now _-prefixed
-                "call" | "addr" | "sys" | "lit" | "str" | "sizeof" | "offset" | "obj" | "cast" | "arr" | "tensor" => {
-                    self.err(&format!("'{}' is now '_{}' — immediate ops are _-prefixed", tok, tok));
+                "call" | "addr" | "sys" | "lit" | "str" | "sizeof" | "offset" | "obj" | "cast" | "arr" => {
+                    let n: &str = if tok == "sys" { "syscall" } else if tok == "sizeof" { "size_of" } else if tok == "arr" { "array" } else { tok.as_str() };
+                    self.err(&format!("'{}' is now '_{}' — immediate ops are _-prefixed", tok, n));
                 }
                 _ => {
                     if let Some(idx) = mnemonic_index(&tok) {
                         // plain opcode with no operand handling
                         out.push(Tok::Op(OP_NAMES[idx]));
+                    } else if let Some(id) = type_id(&tok) {
+                        // v13: bare type keywords push their type id
+                        // (e.g. `[1 2] int array`, `x _cast int`)
+                        out.push(Tok::PushI(id));
                     } else if let Some(t) = parse_text_num(&tok) {
                         out.push(t);
                     } else if is_bad_ident(&tok) {
@@ -1736,7 +1789,7 @@ pub fn lex_source(src: &str) -> Vec<Tok> {
         Lexer::new(src).lex()
     } else {
         let toks = text_tokens(src);
-        let mut lx = TextLexer { toks, pos: 0 };
+        let mut lx = TextLexer { toks, pos: 0, prev_ret: false };
         let mut out = Vec::new();
         lx.run(&mut out, 0);
         out

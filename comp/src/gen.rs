@@ -184,7 +184,7 @@ fn f64_expr(v: &VEntry) -> String {
 // semantics at runtime (float dominates); bitwise ops require both Int.
 fn infer_bin_type(h: &str, a: VType, b: VType) -> VType {
     match h {
-        "op_lt" | "op_gt" | "op_eq" => VType::Int,
+        "op_lt" | "op_gt" | "op_lte" | "op_gte" | "op_eq" => VType::Int,
         "op_and" | "op_or" | "op_xor" => {
             if a == VType::Int && b == VType::Int { VType::Int } else { VType::Unknown }
         }
@@ -239,6 +239,27 @@ pub fn plab(prefix: &str, i: usize) -> String {
     }
 }
 
+// v13: the data-stack pointer a body's guarded param pops compare against —
+// the caller's saved sp (the just-pushed cs entry), or the outline's own
+// pre-arg pointer, or 0 at the top level.
+fn param_base(prefix: &str) -> &'static str {
+    if prefix.starts_with("OB") {
+        "_osp"
+    } else {
+        "(cx->csp>0?cx->rsps[cx->csp-1]:0)"
+    }
+}
+
+// guard expression for the k-th reversed param pop: fires only while the
+// caller's stack still holds cells above base + (arity-1-k)
+fn base_off(base: &str, off: usize) -> String {
+    if off > 0 {
+        format!("{}+{}", base, off)
+    } else {
+        base.to_string()
+    }
+}
+
 // A FOR body starting at instruction `bs` is inlinable if its terminating
 // RET is the first RET in the range (no early returns) and no internal jump
 // leaves the range. Returns the exclusive end (= the RET's index).
@@ -286,7 +307,6 @@ pub fn emit_range(
     inline_fors: &HashMap<usize, (usize, usize)>,
     inline_ffolds: &HashMap<usize, (usize, usize)>,
     inline_whiles: &HashMap<usize, (usize, usize, usize, usize)>,
-    inline_calls: &HashMap<usize, (usize, usize)>,
     outlined_bodies: &HashMap<usize, (usize, usize)>,
     suppress: &std::collections::HashSet<usize>,
     ext_idx: &HashMap<&str, usize>,
@@ -306,6 +326,8 @@ pub fn emit_range(
     let mut vstack: Vec<VEntry> = Vec::new();
     let mut vcache: Vec<(String, String, bool)> = Vec::new();
     let mut vtmp = 0usize;
+    // v13: stack of saved literal-start ds pointers (LIFO — literals nest)
+    let mut lit_starts: Vec<usize> = Vec::new();
     for (i, ins) in p.ins.iter().enumerate().take(end).skip(start) {
         let mut e = String::new();
         if i > start && targets.contains(&i) {
@@ -364,6 +386,8 @@ pub fn emit_range(
                     "op_rem" => Some("uf_crem"),
                     "op_lt"  => Some("uf_clt"),
                     "op_gt"  => Some("uf_cgt"),
+                    "op_lte" => Some("uf_clte"),
+                    "op_gte" => Some("uf_cgte"),
                     "op_eq"  => Some("uf_ceq"),
                     "op_or"  => Some("uf_cor"),
                     "op_xor" => Some("uf_cxor"),
@@ -381,7 +405,7 @@ pub fn emit_range(
                     let a = vpop(&mut e, &mut vstack, &mut vtmp);
                     let rt = result_type(a.ty, b.ty);
                     let is_arith = matches!(*h, "op_add"|"op_sub"|"op_mul"|"op_div"|"op_rem");
-                    let is_cmp = matches!(*h, "op_lt"|"op_gt"|"op_eq");
+                    let is_cmp = matches!(*h, "op_lt"|"op_gt"|"op_lte"|"op_gte"|"op_eq");
                     if (is_arith || is_cmp)
                         && (a.ty == VType::Float || b.ty == VType::Float)
                         && a.ty != VType::FloatArr && b.ty != VType::FloatArr
@@ -399,6 +423,8 @@ pub fn emit_range(
                             "op_rem" => { vpush(&mut e, &mut vstack, &mut vtmp, &format!("fmod({}, {})", fa, fb), VType::Float); }
                             "op_lt"  => { vpush_cond(&mut e, &mut vstack, &mut vtmp, format!("(({} < {}) ? 1 : 0)", fa, fb), VType::Int, &fa, &fb); }
                             "op_gt"  => { vpush_cond(&mut e, &mut vstack, &mut vtmp, format!("(({} > {}) ? 1 : 0)", fa, fb), VType::Int, &fa, &fb); }
+                            "op_lte" => { vpush_cond(&mut e, &mut vstack, &mut vtmp, format!("(({} <= {}) ? 1 : 0)", fa, fb), VType::Int, &fa, &fb); }
+                            "op_gte" => { vpush_cond(&mut e, &mut vstack, &mut vtmp, format!("(({} >= {}) ? 1 : 0)", fa, fb), VType::Int, &fa, &fb); }
                             "op_eq"  => { vpush_cond(&mut e, &mut vstack, &mut vtmp, format!("(({} == {}) ? 1 : 0)", fa, fb), VType::Int, &fa, &fb); }
                             _ => unreachable!(),
                         }
@@ -441,6 +467,7 @@ pub fn emit_range(
                         };
                         let cmp_str = match *h {
                             "op_lt" => Some("<"), "op_gt" => Some(">"),
+                            "op_lte" => Some("<="), "op_gte" => Some(">="),
                             "op_eq" => Some("=="),
                             _ => None,
                         };
@@ -572,14 +599,14 @@ pub fn emit_range(
                                     if *h == "op_ffold" {
                                         /* inlined FFOLD: getline loop + line string + callback */
                                         e.push_str("{Cell _ff_acc=pop(cx),_ff_p=pop(cx);FILE*_fp=fopen(uf_sptr(_ff_p),\"r\");if(!_fp)die(\"FFOLD: cannot open file\");char*_line=0;size_t _ncap=0;ssize_t m;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FF_C_");
-                                        e.push_str(&format!("{}{};cx->loops[fr].end=&&K_FF_E_{}{};while((m=getline(&_line,&_ncap,_fp))>=0){{while(m>0&&(_line[m-1]=='\\n'||_line[m-1]=='\\r'))_line[--m]=0;Cell _ls=uf_str_new(_line,(size_t)m);pushc(cx,_ff_acc);pushc(cx,_ls);\n", prefix, i, prefix, i));
+                                        e.push_str(&format!("{}{};cx->loops[fr].end=&&K_FF_E_{}{};long _ff_base=cx->sp;while((m=getline(&_line,&_ncap,_fp))>=0){{while(m>0&&(_line[m-1]=='\\n'||_line[m-1]=='\\r'))_line[--m]=0;Cell _ls=uf_str_new(_line,(size_t)m);pushc(cx,_ff_acc);pushc(cx,_ls);\n", prefix, i, prefix, i));
                                         let inner = format!("{}FF{}_", prefix, i);
-                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, outlined_bodies, suppress, ext_idx, bs, be, &inner, depth + 1, local_types, ins_body, &HashMap::new(), &std::collections::HashSet::new(), &HashMap::new());
-                                        e.push_str(&format!("K_FF_C_{}{}:;_ff_acc=pop(cx);}}K_FF_E_{}{}:;cx->lsp=fr;free(_line);fclose(_fp);pushc(cx,_ff_acc);}}\n", prefix, i, prefix, i));
+                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, outlined_bodies, suppress, ext_idx, bs, be, &inner, depth + 1, local_types, ins_body, &HashMap::new(), &std::collections::HashSet::new(), &HashMap::new());
+                                        e.push_str(&format!("K_FF_C_{}{}:;_ff_acc=pop(cx);cx->sp=_ff_base+1;}}K_FF_E_{}{}:;cx->lsp=fr;free(_line);fclose(_fp);pushc(cx,_ff_acc);}}\n", prefix, i, prefix, i));
                                     } else if *h == "op_fsplit" {
                                         /* inlined FSPLIT: getline loop + in-place split + field offsets + callback */
                                         e.push_str("{Cell _ff_acc=pop(cx),_ff_sep=pop(cx),_ff_p=pop(cx);const char*_E=uf_sptr(_ff_sep);if(!*_E)die(\"FSPLIT: empty separator\");size_t _el=strlen(_E);FILE*_fp=fopen(uf_sptr(_ff_p),\"r\");if(!_fp)die(\"FSPLIT: cannot open file\");char*_line=0;size_t _ncap=0;ssize_t m;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FF_C_");
-                                        e.push_str(&format!("{}{};cx->loops[fr].end=&&K_FF_E_{}{};while((m=getline(&_line,&_ncap,_fp))>=0){{\n", prefix, i, prefix, i));
+                                        e.push_str(&format!("{}{};cx->loops[fr].end=&&K_FF_E_{}{};long _ff_base=cx->sp;while((m=getline(&_line,&_ncap,_fp))>=0){{\n", prefix, i, prefix, i));
                                         /* set up fsplit thread-locals for fget/fatoi/fsget/fbyte */
                                         e.push_str("while(m>0&&(_line[m-1]=='\\n'||_line[m-1]=='\\r'))_line[--m]=0;\n");
                                         e.push_str("uf_fsplit_line=_line;uf_fsplit_parent=(Hdr*)_line;\n");
@@ -587,17 +614,27 @@ pub fn emit_range(
                                         e.push_str("while(uf_fsplit_nfields<128){char*_sp=strstr(_cur,_E);if(!_sp){uf_fsplit_offsets[uf_fsplit_nfields*2]=(int64_t)(_cur-_line);uf_fsplit_offsets[uf_fsplit_nfields*2+1]=(int64_t)strlen(_cur);uf_fsplit_nfields++;break;}*_sp=0;uf_fsplit_offsets[uf_fsplit_nfields*2]=(int64_t)(_cur-_line);uf_fsplit_offsets[uf_fsplit_nfields*2+1]=(int64_t)(_sp-_cur);uf_fsplit_nfields++;_cur=_sp+_el;}\n");
                                         e.push_str("pushc(cx,_ff_acc);pushi(cx,uf_fsplit_nfields);\n");
                                         let inner = format!("{}FF{}_", prefix, i);
-                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, outlined_bodies, suppress, ext_idx, bs, be, &inner, depth + 1, local_types, ins_body, &HashMap::new(), &std::collections::HashSet::new(), &HashMap::new());
-                                        e.push_str(&format!("K_FF_C_{}{}:;_ff_acc=pop(cx);}}K_FF_E_{}{}:;cx->lsp=fr;free(_line);fclose(_fp);uf_fsplit_line=0;pushc(cx,_ff_acc);}}\n", prefix, i, prefix, i));
+                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, outlined_bodies, suppress, ext_idx, bs, be, &inner, depth + 1, local_types, ins_body, &HashMap::new(), &std::collections::HashSet::new(), &HashMap::new());
+                                        e.push_str(&format!("K_FF_C_{}{}:;_ff_acc=pop(cx);cx->sp=_ff_base+1;}}K_FF_E_{}{}:;cx->lsp=fr;free(_line);fclose(_fp);uf_fsplit_line=0;pushc(cx,_ff_acc);}}\n", prefix, i, prefix, i));
                                     } else if *h == "op_rangefold" {
                                         /* inlined RANGEFOLD: count loop + callback */
-                                        e.push_str(&format!("{{Cell _rf_acc=pop(cx);int64_t _rf_cnt=uf_i(pop(cx));long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_RF_C_{}{};cx->loops[fr].end=&&K_RF_E_{}{};for(int64_t _rf_k=0;_rf_k<_rf_cnt;_rf_k++){{pushc(cx,_rf_acc);pushi(cx,_rf_k);\n", prefix, i, prefix, i));
+                                        e.push_str(&format!("{{Cell _rf_acc=pop(cx);int64_t _rf_cnt=uf_i(pop(cx));long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_RF_C_{}{};cx->loops[fr].end=&&K_RF_E_{}{};long _rf_base=cx->sp;for(int64_t _rf_k=0;_rf_k<_rf_cnt;_rf_k++){{pushc(cx,_rf_acc);pushi(cx,_rf_k);\n", prefix, i, prefix, i));
                                         let inner = format!("{}RF{}_", prefix, i);
-                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, outlined_bodies, suppress, ext_idx, bs, be, &inner, depth + 1, local_types, ins_body, &HashMap::new(), &std::collections::HashSet::new(), &HashMap::new());
-                                        e.push_str(&format!("K_RF_C_{}{}:;_rf_acc=pop(cx);}}K_RF_E_{}{}:;cx->lsp=fr;pushc(cx,_rf_acc);}}\n", prefix, i, prefix, i));
+                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, outlined_bodies, suppress, ext_idx, bs, be, &inner, depth + 1, local_types, ins_body, &HashMap::new(), &std::collections::HashSet::new(), &HashMap::new());
+                                        e.push_str(&format!("K_RF_C_{}{}:;_rf_acc=pop(cx);cx->sp=_rf_base+1;}}K_RF_E_{}{}:;cx->lsp=fr;pushc(cx,_rf_acc);}}\n", prefix, i, prefix, i));
                                     }
                                 }
                             } else {
+                                if *h == "op_drop" {
+                                    if let Some(off) = p.param_pcs.get(&i).copied() {
+                                        // v13: `_!` parameter — discard the cell
+                                        // with a null-fallback guard
+                                        let base = param_base(prefix);
+                                        e.push_str(&format!("if(cx->sp>{}&&cx->sp>0){{pop(cx);}}\n", base_off(base, off)));
+                                        o.push_str(&e);
+                                        continue;
+                                    }
+                                }
                                 vflush(&mut e, &mut vstack, &mut vcache);
                                 e.push_str(&format!("uf_cur_op=\"{}\";{}(cx);\n", h, h));
                             }
@@ -764,7 +801,7 @@ pub fn emit_range(
                         }
                         let eff_bs = if reg_store.is_some() { bs + 1 } else { bs };
                         let inner = format!("{}F{}_", prefix, i);
-                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, outlined_bodies, suppress, ext_idx, eff_bs, be, &inner, depth + 1, local_types, ins_body, &reg, numeric, &arr_ptr);
+                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, outlined_bodies, suppress, ext_idx, eff_bs, be, &inner, depth + 1, local_types, ins_body, &reg, numeric, &arr_ptr);
                         e.push_str(&format!("K_FC_{}{}:;cx->sp=_sp0;}}\nK_FE_{}{}:;", prefix, i, prefix, i));
                         for (id, (name, ty)) in &regs {
                             if inherited.contains(id) { continue; }
@@ -778,7 +815,7 @@ pub fn emit_range(
                     }
                     None => {
                         e.push_str(&format!(
-                        "{{const void* t=((void*)pop(cx).i);int64_t cnt=pop(cx).i;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FC_{}{};cx->loops[fr].end=&&K_FE_{}{};for(int64_t k=0;k<cnt;k++){{pushi(cx,k);cx->cs[cx->csp++]=&&K_{}{};goto *t;K_{}{}:;if(cx->sp>0)pop(cx);K_FC_{}{}:;}}K_FE_{}{}:;cx->lsp=fr;}}\n",
+                        "{{const void* t=((void*)pop(cx).i);int64_t cnt=pop(cx).i;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FC_{}{};cx->loops[fr].end=&&K_FE_{}{};for(int64_t k=0;k<cnt;k++){{pushi(cx,k);uf_cspush(cx,&&K_{}{},cx->sp-1);goto *t;K_{}{}:;if(cx->sp>0)pop(cx);K_FC_{}{}:;}}K_FE_{}{}:;cx->lsp=fr;}}\n",
                         prefix, i, prefix, i, prefix, i, prefix, i, prefix, i, prefix, i
                         ));
                     }
@@ -786,23 +823,8 @@ pub fn emit_range(
             }
             Ins::Call(l) => {
                 vflush(&mut e, &mut vstack, &mut vcache);
-                if depth < 8 {
-                    if let Some(&(bs, be)) = inline_calls.get(&i) {
-                        // Inlined CALL: emit body inline in a C scope.
-                        // Locals: save base, bump by inline body's frame size,
-                        // run body, restore base.
-                        let inner = format!("{}C{}_", prefix, i);
-                        let lc = p.local_counts.get(&bs).copied().unwrap_or(0);
-                        e.push_str(&format!("{{long _lb=cx->local_base;cx->local_base+={};\n", lc));
-                        // v11: don't trim trailing PushI — the caller may need
-                        // the value pushed before RET (e.g. "0 ret" convention)
-                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, outlined_bodies, suppress, ext_idx, bs, be, &inner, depth + 1, local_types, ins_body, &HashMap::new(), &std::collections::HashSet::new(), &HashMap::new());
-                        e.push_str("cx->local_base=_lb;}\n");
-                        o.push_str(&e);
-                        continue;
-                    }
-                }
-                // Check if this call was outlined to a separate function
+                // Outlined bodies run as separate C functions; the body computes
+                // its own drain target (_osp) from its declared arity.
                 if let Some(&(bs, _be)) = outlined_bodies.get(&i) {
                     if UF_DEBUG.load(Ordering::Relaxed) {
                         e.push_str(&format!("cx->call_pcs[cx->call_csp++]={};", bs));
@@ -811,16 +833,23 @@ pub fn emit_range(
                     o.push_str(&e);
                     continue;
                 }
+                // v13: save the caller's data-stack pointer just below the
+                // arguments (clamped to 0). The callee's RET restores sp to
+                // this value and pushes the single return value, so the call
+                // boundary is self-contained (stack draining).
                 let target_pc = resolve(l);
+                let arity = p.label_params.get(&target_pc).map(|v| v.len()).unwrap_or(0);
                 let lc = p.local_counts.get(&target_pc).copied().unwrap_or(0);
                 let call_pc_push = if UF_DEBUG.load(Ordering::Relaxed) { format!("cx->call_pcs[cx->call_csp++]={};", target_pc) } else { String::new() };
                 let call_pc_pop = if UF_DEBUG.load(Ordering::Relaxed) { "cx->call_csp--;".to_string() } else { String::new() };
                 e.push_str(&format!(
-                    "cx->local_frames[cx->local_fsp++]=cx->local_base;cx->local_base+={};{}cx->cs[cx->csp++]=&&K_{}{};goto L_{};K_{}{}:;cx->local_base=cx->local_frames[--cx->local_fsp];{}\n",
+                    "cx->local_frames[cx->local_fsp++]=cx->local_base;cx->local_base+={};{}uf_cspush(cx,&&K_{}{},cx->sp>{}?cx->sp-{}:0);goto L_{};K_{}{}:;cx->local_base=cx->local_frames[--cx->local_fsp];{}\n",
                     lc,
                     call_pc_push,
                     prefix,
                     i,
+                    arity,
+                    arity,
                     target_pc,
                     prefix,
                     i,
@@ -828,31 +857,58 @@ pub fn emit_range(
                 ))
             }
             Ins::Ret => {
-                // v12: auto-discard unbound values; keep only the top value as
-                // the return value. If the virtual stack is empty, assume the
-                // caller already placed the return value on the real stack.
-                if let Some(top) = vstack.pop() {
-                    vdiscard(&mut e, &mut vstack, &mut vcache);
-                    match top.ty {
-                        VType::Unknown | VType::FloatArr => e.push_str(&format!("pushc(cx,{});", top.expr)),
-                        VType::Float => e.push_str(&format!("pushf(cx,{});", top.expr)),
-                        VType::Int => e.push_str(&format!("pushi(cx,{});", top.expr)),
+                // v13: return-value rules, then stack draining.
+                //   * vstack holds exactly one value  -> return it
+                //   * vstack holds several            -> build a list, return it
+                //   * vstack empty                    -> return the top of the
+                //     real stack above the frame base (v12-style bare `ret`
+                //     compat), else null
+                // The return value is computed into a C temp first (the real
+                // stack is still available for the fallback read), then the
+                // data stack is drained back to the caller's saved pointer and
+                // the return value is pushed on top.
+                let vals = std::mem::take(&mut vstack);
+                vdiscard(&mut e, &mut vstack, &mut vcache);
+                let outlined = prefix.starts_with("OB");
+                let base = if outlined { "_osp" } else { "(cx->csp>0?cx->rsps[cx->csp-1]:0)" };
+                let rv = format!("_rv{}", vtmp);
+                vtmp += 1;
+                let rr = format!("_r{}", vtmp);
+                vtmp += 1;
+                let mut pre = String::new();
+                if vals.is_empty() {
+                    // real-stack fallback, read before the drain changes sp
+                    pre.push_str(&format!("Cell {}=(cx->sp>{}&&cx->sp>0)?cx->ds[cx->sp-1]:uf_mki(0);", rv, base));
+                } else if vals.len() == 1 {
+                    let v = &vals[0];
+                    match v.ty {
+                        VType::Unknown | VType::FloatArr => pre.push_str(&format!("Cell {}={};", rv, v.expr)),
+                        VType::Float => pre.push_str(&format!("Cell {}=uf_mkf({});", rv, v.expr)),
+                        VType::Int => pre.push_str(&format!("Cell {}=uf_mki({});", rv, v.expr)),
                     }
                 } else {
-                    vdiscard(&mut e, &mut vstack, &mut vcache);
+                    // multi-value ret: root the values on the ds, build a fresh
+                    // list from them, then drain
+                    for v in &vals {
+                        match v.ty {
+                            VType::Unknown | VType::FloatArr => pre.push_str(&format!("pushc(cx,{});", v.expr)),
+                            VType::Float => pre.push_str(&format!("pushf(cx,{});", v.expr)),
+                            VType::Int => pre.push_str(&format!("pushi(cx,{});", v.expr)),
+                        }
+                    }
+                    pre.push_str(&format!("Cell {}=uf_list_build(cx,{});", rv, vals.len()));
                 }
-                if prefix.starts_with("OB") {
-                    // Inside an outlined function: RET restores the local frame
-                    // and returns to caller. The frame setup/restore is split:
-                    // setup is in the function wrapper, restore is here because
-                    // we need to return from inside the body.
+                if outlined {
                     let pop = if UF_DEBUG.load(Ordering::Relaxed) { "cx->call_csp--;" } else { "" };
-                    e.push_str(&format!("{{cx->local_base=cx->local_frames[--cx->local_fsp];{}return;}}\n", pop));
+                    e.push_str(&format!(
+                        "{}{{cx->sp=_osp;pushc(cx,{});cx->local_base=cx->local_frames[--cx->local_fsp];{}return;}}\n",
+                        pre, rv, pop
+                    ));
                 } else {
-                    // v11: standard RET. The CALL path handles frame restore in the
-                    // K_after_call continuation. The uf_call_addr path (try/retry/
-                    // exports/callbacks) pushes a NULL return sentinel.
-                    e.push_str("{if(cx->csp==0)return;{const void* r=cx->cs[--cx->csp];if(!r)return;goto *r;}}\n");
+                    e.push_str(&format!(
+                        "{}{{if(cx->csp==0){{pushc(cx,{});return;}}cx->csp--;const void*{}=cx->cs[cx->csp];cx->sp=cx->rsps[cx->csp];pushc(cx,{});if(!{})return;goto *{};}}\n",
+                        pre, rv, rr, rv, rr, rr
+                    ));
                 }
             }
             Ins::Goto(l) => {
@@ -887,20 +943,71 @@ pub fn emit_range(
                     }
                 }
                 vflush(&mut e, &mut vstack, &mut vcache);
+                // v13: the body's declared arity sets the drain point (the
+                // caller's cells below the branch's arguments stay put)
+                let if_arity = if i > start {
+                    match &p.ins[i - 1] {
+                        Ins::PushAddr(l) => p.label_params.get(&resolve(l)).map(|v| v.len()).unwrap_or(0),
+                        _ => 0,
+                    }
+                } else { 0 };
                 e.push_str(&format!(
-                    "{{const void* b=(const void*)pop(cx).i;Cell c=pop(cx);if(uf_truthy(c)){{cx->cs[cx->csp++]=&&K_{}{};goto *b;K_{}{}:;}}}}\n",
-                    prefix, i, prefix, i
+                    "{{const void* b=(const void*)pop(cx).i;Cell c=pop(cx);if(uf_truthy(c)){{uf_cspush(cx,&&K_{}{},cx->sp>{}?cx->sp-{}:0);goto *b;K_{}{}:;}}}}\n",
+                    prefix, i, if_arity, if_arity, prefix, i
                 ))
             }
             Ins::IfElse => {
                 vflush(&mut e, &mut vstack, &mut vcache);
+                // v13: each branch may declare its own arity; the drain point
+                // is saved per branch before jumping
+                let (th_ar, el_ar) = if i > start {
+                    match (&p.ins[i - 2], &p.ins[i - 1]) {
+                        (Ins::PushAddr(tl), Ins::PushAddr(el)) => (
+                            p.label_params.get(&resolve(tl)).map(|v| v.len()).unwrap_or(0),
+                            p.label_params.get(&resolve(el)).map(|v| v.len()).unwrap_or(0),
+                        ),
+                        _ => (0, 0),
+                    }
+                } else { (0, 0) };
+                // v13: if the if_else is the last instruction of its body (the
+                // next instruction is a label target), the continuation must
+                // return — otherwise it would fall through into the next
+                // label's body. The branch's return value is on the stack
+                // (above the body's drain point), so the fallback ret
+                // re-returns it. Only in real bodies (top level or outlined) —
+                // inside an inlined loop/streaming copy the continuation just
+                // falls through to the loop's accumulator pop.
+                let mut cont = String::new();
+                let cont_ok = (prefix.is_empty() || prefix.starts_with("OB")) && targets.contains(&(i + 1));
+                if cont_ok {
+                    let rv = format!("_rv{}", vtmp);
+                    vtmp += 1;
+                    let rr = format!("_r{}", vtmp);
+                    vtmp += 1;
+                    cont.push_str(&format!("Cell {}=(cx->sp>{}&&cx->sp>0)?cx->ds[cx->sp-1]:uf_mki(0);", rv, param_base(prefix)));
+                    if prefix.starts_with("OB") {
+                        cont.push_str(&format!("{{cx->sp=_osp;pushc(cx,{});cx->local_base=cx->local_frames[--cx->local_fsp];return;}}", rv));
+                    } else {
+                        cont.push_str(&format!("{{if(cx->csp==0){{pushc(cx,{});return;}}cx->csp--;const void*{}=cx->cs[cx->csp];cx->sp=cx->rsps[cx->csp];pushc(cx,{});if(!{})return;goto *{};}}", rv, rr, rv, rr, rr));
+                    }
+                }
                 e.push_str(&format!(
-                    "{{const void* el=(const void*)pop(cx).i;const void* th=(const void*)pop(cx).i;Cell c=pop(cx);cx->cs[cx->csp++]=&&K_{}{};goto *((uf_truthy(c))?th:el);K_{}{}:;}}\n",
-                    prefix, i, prefix, i
+                    "{{const void* el=(const void*)pop(cx).i;const void* th=(const void*)pop(cx).i;Cell c=pop(cx);if(uf_truthy(c)){{uf_cspush(cx,&&K_{}{},cx->sp>{}?cx->sp-{}:0);goto *th;}}else{{uf_cspush(cx,&&K_{}{},cx->sp>{}?cx->sp-{}:0);goto *el;}}K_{}{}:;{}}}\n",
+                    prefix, i, th_ar, th_ar, prefix, i, el_ar, el_ar, prefix, i, cont
                 ))
             }
             Ins::While => {
                 vflush(&mut e, &mut vstack, &mut vcache);
+                // v13: cond/body declared arities set the per-call drain points
+                let (cond_arity, body_arity) = if i >= 2 {
+                    match (&p.ins[i - 2], &p.ins[i - 1]) {
+                        (Ins::PushAddr(cl), Ins::PushAddr(bl)) => (
+                            p.label_params.get(&resolve(cl)).map(|v| v.len()).unwrap_or(0),
+                            p.label_params.get(&resolve(bl)).map(|v| v.len()).unwrap_or(0),
+                        ),
+                        _ => (0, 0),
+                    }
+                } else { (0, 0) };
                 if depth < 8 {
                     if let Some((bbs, bbe, cbs, cbe)) = inline_whiles.get(&i).copied() {
                         let inner_c = format!("{}WC{}_", prefix, i);
@@ -992,7 +1099,7 @@ pub fn emit_range(
                         // plain typed value push, peel it into a direct C test
                         // and skip the data-stack round trip entirely.
                         let mut ce = String::new();
-                        emit_range(&mut ce, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, outlined_bodies, suppress, ext_idx, cbs, cbe_trim, &inner_c, depth + 1, local_types, ins_body, &reg, numeric, &arr_ptr);
+                        emit_range(&mut ce, p, targets, inline_fors, inline_ffolds, inline_whiles, outlined_bodies, suppress, ext_idx, cbs, cbe_trim, &inner_c, depth + 1, local_types, ins_body, &reg, numeric, &arr_ptr);
                         let mut direct_cond: Option<String> = None;
                         if ce.ends_with(");") {
                             for tag in ["pushi(cx,", "pushf(cx,"] {
@@ -1024,7 +1131,7 @@ pub fn emit_range(
                             None => e.push_str(&format!("}}_wc=pop(cx);if(uf_zero(_wc))goto K_WE_{}{};\n", prefix, i)),
                         }
                         e.push_str("{\n");
-                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, inline_calls, outlined_bodies, suppress, ext_idx, bbs, bbe_trim, &inner_b, depth + 1, local_types, ins_body, &reg, numeric, &arr_ptr);
+                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, outlined_bodies, suppress, ext_idx, bbs, bbe_trim, &inner_b, depth + 1, local_types, ins_body, &reg, numeric, &arr_ptr);
                         e.push_str(&format!("}}cx->sp=_sp0;goto K_WC_{}{};}}\nK_WE_{}{}:;", prefix, i, prefix, i));
                         for (id, (name, ty)) in &regs {
                             match ty {
@@ -1041,15 +1148,15 @@ pub fn emit_range(
                 e.push_str(&format!(
                     "{{const void* bod=(const void*)pop(cx).i;const void* cnd=(const void*)pop(cx).i;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;\n\
                      K_WT_{}{}:;cx->loops[fr].cont=&&K_WT_{}{};cx->loops[fr].end=&&K_WE_{}{};\n\
-                     cx->cs[cx->csp++]=&&K_WC_{}{};goto *cnd;K_WC_{}{}:;\n\
+                     uf_cspush(cx,&&K_WC_{}{},cx->sp>{}?cx->sp-{}:0);goto *cnd;K_WC_{}{}:;\n\
                      if(uf_zero(pop(cx)))goto K_WE_{}{};\n\
-                     cx->cs[cx->csp++]=&&K_WB_{}{};goto *bod;K_WB_{}{}:;pop(cx);\n\
+                     uf_cspush(cx,&&K_WB_{}{},cx->sp>{}?cx->sp-{}:0);goto *bod;K_WB_{}{}:;pop(cx);\n\
                      goto K_WT_{}{};\n\
                      K_WE_{}{}:;cx->lsp=fr;}}\n",
                     prefix, i, prefix, i, prefix, i,
-                    prefix, i, prefix, i,
+                    prefix, i, cond_arity, cond_arity, prefix, i,
                     prefix, i,
-                    prefix, i, prefix, i,
+                    prefix, i, body_arity, body_arity, prefix, i,
                     prefix, i,
                     prefix, i
                 ))
@@ -1063,7 +1170,19 @@ pub fn emit_range(
                 e.push_str("{if(cx->lsp<=0)die(\"cont outside loop\");cx->csp=cx->loops[cx->lsp-1].cspl;goto *cx->loops[cx->lsp-1].cont;}\n")
             }
             Ins::SetV(v) => {
-                let t = vpop(&mut e, &mut vstack, &mut vtmp);
+                let par_off = p.param_pcs.get(&i).copied();
+                let is_param_bind = par_off.is_some();
+                let t = if let Some(off) = par_off {
+                    let base = param_base(prefix);
+                    let tmp = format!("_pp{}", vtmp);
+                    vtmp += 1;
+                    e.push_str(&format!("Cell {}=(cx->sp>{}&&cx->sp>0)?pop(cx):uf_mki(0);", tmp, base_off(base, off)));
+                    // the k-th pop (reversed order) fires only when the caller
+                    // left (arity - k) cells above the base
+                    VEntry { expr: tmp.clone(), ty: VType::Unknown }
+                } else {
+                    vpop(&mut e, &mut vstack, &mut vtmp)
+                };
                 // Wrap typed values into Cell for global storage
                 let cell_expr = match t.ty {
                     VType::Unknown | VType::FloatArr => t.expr.clone(),
@@ -1077,7 +1196,10 @@ pub fn emit_range(
                     vcache.push((v.clone(), cell_expr, true));
                 }
                 // v12: assignment is pass-through; leave value on stack
-                vstack.push(t);
+                // (param binds consume their cell and are not pass-through)
+                if !is_param_bind {
+                    vstack.push(t);
+                }
             }
             Ins::GetV(v) => {
                 if let Some((_, t, _)) = vcache.iter().find(|(n, _, _)| n == v) {
@@ -1089,12 +1211,23 @@ pub fn emit_range(
                 }
             }
             Ins::LocalSetI(id) => {
-                // v12: a LocalSetI that pops from an empty virtual stack is
-                // binding an incoming parameter (body continuation). Parameters
-                // are not pass-through; only assignments of already-materialized
-                // values leave the value on the hidden stack.
-                let is_param_bind = vstack.is_empty();
-                let t = vpop(&mut e, &mut vstack, &mut vtmp);
+                // v13: param pops (instruction pcs recorded by the parser) pop
+                // with a guard against the caller's saved stack pointer, so
+                // missing arguments bind null instead of underflowing. They are
+                // not pass-through.
+                let par_off = p.param_pcs.get(&i).copied();
+                let is_param_bind = par_off.is_some();
+                let t = if let Some(off) = par_off {
+                    let base = param_base(prefix);
+                    let tmp = format!("_pp{}", vtmp);
+                    vtmp += 1;
+                    e.push_str(&format!("Cell {}=(cx->sp>{}&&cx->sp>0)?pop(cx):uf_mki(0);", tmp, base_off(base, off)));
+                    // the k-th pop (reversed order) fires only when the caller
+                    // left (arity - k) cells above the base
+                    VEntry { expr: tmp.clone(), ty: VType::Unknown }
+                } else {
+                    vpop(&mut e, &mut vstack, &mut vtmp)
+                };
                 if let Some((name, ty)) = reg.get(id) {
                     // Register-cached slot: raw C assignment, no memory traffic
                     let rhs = if *ty == VType::Int {
@@ -1188,6 +1321,57 @@ pub fn emit_range(
                 }
                 e.push_str("}\n");
             }
+            Ins::Flush => {
+                // v13: ret-operand boundary — spill the vstack to the real
+                // stack so the ret's count rule sees only the operand's values
+                vflush(&mut e, &mut vstack, &mut vcache);
+            }
+            Ins::ListStart | Ins::DictStart => {
+                // v13: save the ds pointer at the literal start. Values pushed
+                // before the literal (e.g. earlier dict key/values) are flushed
+                // to the real stack FIRST, so the saved pointer sits below the
+                // literal's own cells and the closing build counts only them.
+                vflush(&mut e, &mut vstack, &mut vcache);
+                let t = vtmp;
+                vtmp += 1;
+                e.push_str(&format!("long _ls{}=cx->sp;", t));
+                lit_starts.push(t);
+            }
+            Ins::ListLit => {
+                // v13: [expr ...] — flush the element values to the real stack
+                // (rooted against GC), build the list from the cells above the
+                // saved literal start, and keep the handle on the virtual stack
+                // so nested literals work
+                let vals = std::mem::take(&mut vstack);
+                for v in &vals {
+                    match v.ty {
+                        VType::Unknown | VType::FloatArr => e.push_str(&format!("pushc(cx,{});", v.expr)),
+                        VType::Float => e.push_str(&format!("pushf(cx,{});", v.expr)),
+                        VType::Int => e.push_str(&format!("pushi(cx,{});", v.expr)),
+                    }
+                }
+                let start = lit_starts.pop().expect("ListLit without ListStart");
+                let tmp = format!("t{}", vtmp);
+                vtmp += 1;
+                e.push_str(&format!("Cell {}=uf_list_build(cx,cx->sp-_ls{});", tmp, start));
+                vstack.push(VEntry { expr: tmp.clone(), ty: VType::Unknown });
+            }
+            Ins::DictLit => {
+                // v13: { k v ... } — alternating key/value cells above the start
+                let vals = std::mem::take(&mut vstack);
+                for v in &vals {
+                    match v.ty {
+                        VType::Unknown | VType::FloatArr => e.push_str(&format!("pushc(cx,{});", v.expr)),
+                        VType::Float => e.push_str(&format!("pushf(cx,{});", v.expr)),
+                        VType::Int => e.push_str(&format!("pushi(cx,{});", v.expr)),
+                    }
+                }
+                let start = lit_starts.pop().expect("DictLit without DictStart");
+                let tmp = format!("t{}", vtmp);
+                vtmp += 1;
+                e.push_str(&format!("Cell {}=uf_dict_build(cx,cx->sp-_ls{});", tmp, start));
+                vstack.push(VEntry { expr: tmp.clone(), ty: VType::Unknown });
+            }
             Ins::CallExt(ii) => {
                 vflush(&mut e, &mut vstack, &mut vcache);
                 let im = &p.imports[*ii];
@@ -1196,9 +1380,18 @@ pub fn emit_range(
             }
             Ins::Send => {
                 vdiscard(&mut e, &mut vstack, &mut vcache);
+                // v13: the method's declared arity sets the drain point
+                let mut snd_arity = 0usize;
+                for (_, _, l) in &p.methods {
+                    if let Some(&pc) = p.labels.get(l) {
+                        if let Some(v) = p.label_params.get(&pc) {
+                            snd_arity = snd_arity.max(v.len());
+                        }
+                    }
+                }
                 e.push_str(&format!(
-                "{{int64_t mid=pop(cx).i;Cell rc=pop(cx);Hdr*h=(Hdr*)rc.i;int64_t tk=(h->tag==HT_OBJ)?1000+(int64_t)h->len:(int64_t)h->tag;const void*lab=0;for(unsigned long q=0;q<sizeof(uf_mt)/sizeof(uf_mt[0]);q++)if(uf_mt[q].tk==tk&&uf_mt[q].mh==mid){{lab=uf_mt[q].lab;break;}}if(!lab)die(\"SEND: no such method\");pushc(cx,rc);cx->cs[cx->csp++]=&&K_{}{};goto *lab;K_{}{}:;}}\n",
-                prefix, i, prefix, i
+                "{{int64_t mid=pop(cx).i;Cell rc=pop(cx);Hdr*h=(Hdr*)rc.i;int64_t tk=(h->tag==HT_OBJ)?1000+(int64_t)h->len:(int64_t)h->tag;const void*lab=0;for(unsigned long q=0;q<sizeof(uf_mt)/sizeof(uf_mt[0]);q++)if(uf_mt[q].tk==tk&&uf_mt[q].mh==mid){{lab=uf_mt[q].lab;break;}}if(!lab)die(\"SEND: no such method\");pushc(cx,rc);uf_cspush(cx,&&K_{}{},cx->sp>{}?cx->sp-{}:0);goto *lab;K_{}{}:;}}\n",
+                prefix, i, snd_arity, snd_arity, prefix, i
                 ))
             }
             Ins::Weave(tasks) => {
@@ -1211,7 +1404,7 @@ pub fn emit_range(
                     e.push_str(&format!(
                         "uf_wt[{}]=(WeaveTask){{{}, {}, uf_wi{}, {}, {{0,0}}, 0, 0,0,0,0,0}};\n",
                         k,
-                        resolve(&t.pc),
+                        t.pc,
                         t.inputs.len(),
                         k,
                         t.count
@@ -1252,7 +1445,7 @@ fn compute_local_types(p: &Parsed) -> (HashMap<usize, VType>, Vec<usize>, std::c
         if let Ins::Call(l) = ins { if let Some(&pc) = p.labels.get(l) { call_entries.insert(pc); } }
     }
     for ins in &p.ins {
-        if let Ins::Weave(tasks) = ins { for t in tasks { if let Some(&pc) = p.labels.get(&t.pc) { call_entries.insert(pc); } } }
+        if let Ins::Weave(tasks) = ins { for t in tasks { call_entries.insert(t.pc); } }
     }
     for (_, l) in &p.exports { if let Some(&pc) = p.labels.get(l) { call_entries.insert(pc); } }
 
@@ -1371,12 +1564,18 @@ fn compute_local_types(p: &Parsed) -> (HashMap<usize, VType>, Vec<usize>, std::c
     for j in 1..p.ins.len() {
         if let (Ins::PushAddr(l), Ins::For) = (&p.ins[j - 1], &p.ins[j]) {
             if let Some(&bs) = p.labels.get(l) {
-                // The first LocalSetI at bs receives the iteration index.
-                if let Some(Ins::LocalSetI(id)) = p.ins.get(bs) {
-                    let body = ins_body[bs];
-                    let key = (body, *id);
-                    result.insert(key, VType::Int);
-                    seeded.insert(key);
+                // v13: only single-parameter bodies receive the loop index as
+                // their (single) argument — multi-param bodies bind the index
+                // to the first declared parameter, which the reversed emission
+                // does not place first.
+                if p.label_params.get(&bs).map(|v| v.len() == 1).unwrap_or(false) {
+                    // The first LocalSetI at bs receives the iteration index.
+                    if let Some(Ins::LocalSetI(id)) = p.ins.get(bs) {
+                        let body = ins_body[bs];
+                        let key = (body, *id);
+                        result.insert(key, VType::Int);
+                        seeded.insert(key);
+                    }
                 }
             }
         }
@@ -1435,7 +1634,7 @@ fn compute_local_types(p: &Parsed) -> (HashMap<usize, VType>, Vec<usize>, std::c
                 Ins::PushF(_) => type_stack.push((VType::Float, false)),
                 Ins::PushS(_) | Ins::PushAddr(_) => type_stack.push((VType::Unknown, true)),
                 Ins::Simple(h) => {
-                    let bin = matches!(*h, "op_add"|"op_sub"|"op_mul"|"op_and"|"op_div"|"op_rem"|"op_lt"|"op_gt"|"op_eq"|"op_or"|"op_xor");
+                    let bin = matches!(*h, "op_add"|"op_sub"|"op_mul"|"op_and"|"op_div"|"op_rem"|"op_lt"|"op_gt"|"op_lte"|"op_gte"|"op_eq"|"op_or"|"op_xor");
                     let un = matches!(*h, "op_shr"|"op_inc"|"op_dec"|"op_not");
                     if bin {
                         let b = type_stack.pop().unwrap_or((VType::Unknown, true));
@@ -1447,6 +1646,8 @@ fn compute_local_types(p: &Parsed) -> (HashMap<usize, VType>, Vec<usize>, std::c
                         // inc/dec preserve type; others return Int
                         let r = if matches!(*h, "op_inc"|"op_dec") { a.0 } else { VType::Int };
                         type_stack.push((r, r == VType::Unknown && a.1));
+                    } else if matches!(*h, "op_drop") {
+                        type_stack.pop();
                     } else if matches!(*h, "op_vget"|"op_idx") {
                         type_stack.pop(); // index
                         // FloatArr handle (float-array local or propagated
@@ -1465,6 +1666,13 @@ fn compute_local_types(p: &Parsed) -> (HashMap<usize, VType>, Vec<usize>, std::c
                     } else if matches!(*h, "op_get") {
                         type_stack.pop(); type_stack.pop();
                         type_stack.push((VType::Unknown, true));
+                    } else if matches!(*h, "op_argi") {
+                        // ARGI: index -> int (argv[index] parsed as integer)
+                        type_stack.pop();
+                        type_stack.push((VType::Int, false));
+                    } else if matches!(*h, "op_hasargs") {
+                        // HASARGS: -> int (1 if any CLI args present)
+                        type_stack.push((VType::Int, false));
                     } else if matches!(*h, "op_argv") {
                         type_stack.push((VType::Unknown, true));
                     } else {
@@ -1516,11 +1724,15 @@ fn compute_local_types(p: &Parsed) -> (HashMap<usize, VType>, Vec<usize>, std::c
                 Ins::SetV(_) => { type_stack.pop(); }
                 Ins::GetV(_) => { type_stack.push((VType::Unknown, true)); }
                 Ins::Ret => {
-                    // Record the return-stack candidate for this body; the
-                    // outer loop uses it to type what CALL leaves behind.
-                    // Continuation RETs feed a dispatcher that consumes one
-                    // value — drop the top.
-                    let mut cand: Vec<VType> = type_stack.iter().map(|e| e.0).collect();
+                    // v13: a body leaves exactly one return value — the top of
+                    // the stack (or null), or a fresh list when several values
+                    // are named. Continuation RETs feed a dispatcher that
+                    // consumes it — drop it from the caller's view.
+                    let mut cand: Vec<VType> = if type_stack.len() >= 2 {
+                        vec![VType::Unknown] // multi-value ret: a list handle
+                    } else {
+                        vec![type_stack.last().map(|e| e.0).unwrap_or(VType::Unknown)]
+                    };
                     if in_cont && !cand.is_empty() { cand.pop(); }
                     ret_cands.entry(*body).or_default().push(cand);
                     type_stack.clear();
@@ -1549,6 +1761,8 @@ fn compute_local_types(p: &Parsed) -> (HashMap<usize, VType>, Vec<usize>, std::c
                     type_stack.clear();
                 }
                 Ins::Sys(_) | Ins::Weave(_) | Ins::Send => { type_stack.clear(); }
+                Ins::Flush | Ins::ListStart | Ins::DictStart => { type_stack.clear(); }
+                Ins::ListLit | Ins::DictLit => { type_stack.clear(); type_stack.push((VType::Unknown, false)); }
                 Ins::Extern(_) => { type_stack.push((VType::Unknown, true)); }
                 Ins::LocalSet(_) | Ins::LocalGet(_) => { type_stack.push((VType::Unknown, true)); }
             }
@@ -1835,7 +2049,7 @@ pub fn gen(p: &Parsed, structs: &StructMap, debug: bool) -> String {
     let resolve = |name: &str| -> usize {
         *p.labels.get(name).unwrap_or_else(|| panic!("undefined label {}", name))
     };
-    o.push_str("\nstatic void uflux_run(Ctx*cx, long pc){\n  uf_current_ctx=cx;\n  if(pc<0){ goto *(void*)uf_entry_addr; }\n  /* v11: set up the entry label's local frame */\n  cx->local_frames[cx->local_fsp++]=cx->local_base; cx->local_base+=uf_lc(pc);\n");
+    o.push_str("\nstatic void uflux_run(Ctx*cx, long pc){\n  uf_current_ctx=cx;\n  if(pc<0){ goto *(void*)uf_entry_addr; }\n  /* v11: set up the entry label's local frame (v13: capacity-checked) */\n  cx->local_frames[cx->local_fsp++]=cx->local_base; cx->local_base+=uf_lc(pc); if(cx->local_base>cx->local_cap)die(\"local frame overflow\");\n");
     let n = p.ins.len();
     // Only labels that can be entered dynamically (initial pc, FOR bodies via
     // PushAddr, weave task entries, SEND methods, exports) go into labtab.
@@ -1852,7 +2066,7 @@ pub fn gen(p: &Parsed, structs: &StructMap, debug: bool) -> String {
             }
             Ins::Weave(tasks) => {
                 for t in tasks {
-                    dyn_idx.insert(resolve(&t.pc));
+                    dyn_idx.insert(t.pc);
                 }
             }
             _ => {}
@@ -1918,7 +2132,6 @@ pub fn gen(p: &Parsed, structs: &StructMap, debug: bool) -> String {
     let mut inline_fors: HashMap<usize, (usize, usize)> = HashMap::new();
     let mut inline_ffolds: HashMap<usize, (usize, usize)> = HashMap::new();
     let mut inline_whiles: HashMap<usize, (usize, usize, usize, usize)> = HashMap::new();
-    let mut inline_calls: HashMap<usize, (usize, usize)> = HashMap::new();
     let mut suppress: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for j in 1..p.ins.len() {
         if let (Ins::PushAddr(l), Ins::For) = (&p.ins[j - 1], &p.ins[j]) {
@@ -1965,23 +2178,9 @@ pub fn gen(p: &Parsed, structs: &StructMap, debug: bool) -> String {
                 }
             }
         }
-        // CALL inlining: detect Ins::Call(label) where body is inlinable.
-        // v11: skip inlining if the target body (or any PushAddr continuation
-        // within it) uses local variables — the inlined copy's local_base
-        // offset would mismatch the original's PushAddr continuation labels.
-        if let Ins::Call(l) = &p.ins[j] {
-            if !targets.contains(&j) {
-                let bs = resolve(l);
-                if let Some(be) = for_body_range(&p.ins, bs) {
-                    if inlinable_for(p, bs, be) {
-                        let has_locals = (bs..be).any(|k| matches!(p.ins[k], Ins::LocalSet(_) | Ins::LocalGet(_) | Ins::LocalSetI(_) | Ins::LocalGetI(_)));
-                        if !has_locals {
-                            inline_calls.insert(j, (bs, be));
-                        }
-                    }
-                }
-            }
-        }
+        // CALL inlining was removed in v13: every call now goes through the
+        // standard cs mechanism so the callee's RET can drain the data stack
+        // back to the caller's saved pointer.
         // IR order: PushAddr(cond_label) at j-2, PushAddr(body_label) at j-1
         if j >= 2 {
             if let (Ins::PushAddr(cl), Ins::PushAddr(bl), Ins::While) = (&p.ins[j - 2], &p.ins[j - 1], &p.ins[j]) {
@@ -2048,14 +2247,18 @@ pub fn gen(p: &Parsed, structs: &StructMap, debug: bool) -> String {
     for (&_call_pc, &(bs, be)) in &outlined_bodies {
         let fname = format!("uf_ob_{}", bs);
         let lc = p.local_counts.get(&bs).copied().unwrap_or(0);
+        let oarity = p.label_params.get(&bs).map(|v| v.len()).unwrap_or(0);
         outlined_fns.push_str(&format!(
             "static void {}(Ctx*cx){{cx->local_frames[cx->local_fsp++]=cx->local_base;cx->local_base+={};\n",
             fname, lc
         ));
+        // v13: the outline's own pre-arg data-stack pointer — its RET drains
+        // back to it and pushes the return value
+        outlined_fns.push_str(&format!("long _osp=cx->sp>{}?cx->sp-{}:0;\n", oarity, oarity));
         let ob_prefix = format!("OB{}_", bs);
         // Emit the body code — use empty reg/arr_ptr maps; the inlined while
         // loops within the body will do their own register caching.
-        emit_range(&mut outlined_fns, p, &targets, &inline_fors, &inline_ffolds, &inline_whiles, &inline_calls, &outlined_bodies, &suppress, &ext_idx, bs, be, &ob_prefix, 0, &mut local_types, &ins_body, &HashMap::new(), &numeric_slots, &HashMap::new());
+        emit_range(&mut outlined_fns, p, &targets, &inline_fors, &inline_ffolds, &inline_whiles, &outlined_bodies, &suppress, &ext_idx, bs, be, &ob_prefix, 0, &mut local_types, &ins_body, &HashMap::new(), &numeric_slots, &HashMap::new());
         // If the body has no explicit RET at the end (shouldn't happen, but
         // be safe), restore the frame.
         outlined_fns.push_str(&format!("cx->local_base=cx->local_frames[--cx->local_fsp];{}}}\n", if UF_DEBUG.load(Ordering::Relaxed) { "cx->call_csp--;" } else { "" }));
@@ -2072,7 +2275,7 @@ pub fn gen(p: &Parsed, structs: &StructMap, debug: bool) -> String {
         });
         o.insert_str(insert_pos, &outlined_fns);
     }
-    emit_range(&mut o, p, &targets, &inline_fors, &inline_ffolds, &inline_whiles, &inline_calls, &outlined_bodies, &suppress, &ext_idx, 0, n, "", 0, &mut local_types, &ins_body, &HashMap::new(), &numeric_slots, &HashMap::new());
+    emit_range(&mut o, p, &targets, &inline_fors, &inline_ffolds, &inline_whiles, &outlined_bodies, &suppress, &ext_idx, 0, n, "", 0, &mut local_types, &ins_body, &HashMap::new(), &numeric_slots, &HashMap::new());
     o.push_str(&format!("L_{}: return;\n}}\n", n));
 
     // exported wrappers (fixed 4-arg C ABI trampoline, run on the main ctx)

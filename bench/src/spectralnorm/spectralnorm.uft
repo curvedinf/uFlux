@@ -1,76 +1,88 @@
-import c"sqrt"(float)->float
-av:
-an! av!
-an@ _arr float tmp!
-0 i!
-'icond 'ibody while
-tmp@ ret
-icond:
-i@ an@ lt ret
-ibody:
-0 sm!
-an@ 'avinner for
-tmp@ i@ sm@ vset
-i@ inc i!
-0 ret
-avinner:
-k!
-i@ k@ + sum!
-sum@ sum@ 1 + * 2 div i@ + 1 + ea!
-av@ k@ vget ea@ div sm@ + sm!
-0 ret
-atv:
-bn! bv!
-bn@ _arr float tmp!
-0 i!
-'cond2 'body2 while
-tmp@ ret
-cond2:
-i@ bn@ lt ret
-body2:
-0 sm!
-bn@ 'atinner for
-tmp@ i@ sm@ vset
-i@ inc i!
-0 ret
-atinner:
-k!
-k@ i@ + sum!
-sum@ sum@ 1 + * 2 div k@ + 1 + ea!
-bv@ k@ vget ea@ div sm@ + sm!
-0 ret
-atac:
-n! x!
-n@ an! n@ bn!
-x@ n@ _call av t1!
-t1@ n@ _call atv
-ret
-entry
+; spectralnorm.uft — v13: spectral norm of the Hilbert-like matrix (bench/SPEC.md)
 5500 n!
-hasargs 'setn if
-n@ _arr float u!
-n@ _arr float v!
-n@ 'ubody for
-10 'itbody for
-0 vbv!
-0 vv!
-n@ 'sbody for
-vbv@ vv@ div _call sqrt "%.9f" fmt print
+has_args 'argn if
+n@ n@ mul float array A!
+n@ float array v!
+n@ float array u!
+n@ float array tmp!
+; init A[i*n+j] = 1/((i+j)(i+j+1)/2 + i + 1), u[i] = 1.0, v[i] = 0.0
+0 i!
+'i_c 'i_b while
+10 'power for
+0 uvt! 0 vvt!
+n@ 'dots for
+uvt@ vvt@ div sqrt "%.9f" format print
 ret
-setn:
-1 argi n!
-0 ret
-ubody:
-k!
-u@ k@ 1.0 vset
-ret
-itbody:
-k!
-u@ n@ _call atac v!
-v@ n@ _call atac u!
-ret
-sbody:
-k!
-u@ k@ vget v@ k@ vget * vbv@ + vbv!
-v@ k@ vget v@ k@ vget * vv@ + vv!
-ret
+argn:
+  1 arg_index n!
+  ret
+i_c:
+  ret i@ n@ lt
+i_b:
+  u@ i@ 1.0 array_set
+  v@ i@ 0.0 array_set
+  0 j!
+  'j_c 'j_b while
+  ret i@ 1 add i!
+j_c:
+  ret j@ n@ lt
+j_b:
+  i@ j@ add ij!
+  ij@ ij@ 1 add mul 2 div i@ add 1 add den!
+  A@ i@ n@ mul j@ add 1.0 den@ div array_set
+  ret j@ 1 add j!
+; power iteration (matches reference): v = AtAv(u), then u = AtAv(v)
+power: k!
+  n@ 'mv1 for
+  n@ 'tm1 for
+  n@ 'mv2 for
+  n@ 'tm2 for
+  ret
+; mv1: tmp[i] = sum_j A[i*n+j] * u[j]
+mv1: i!
+  0 s! 0 j!
+  'm1c 'm1b while
+  tmp@ i@ s@ array_set
+  ret 0
+m1c:
+  ret j@ n@ lt
+m1b:
+  A@ i@ n@ mul j@ add array_get u@ j@ array_get mul s@ add s!
+  ret j@ 1 add j!
+; tm1: v[i] = sum_j A[j*n+i] * tmp[j]
+tm1: i!
+  0 s! 0 j!
+  't1c 't1b while
+  v@ i@ s@ array_set
+  ret 0
+t1c:
+  ret j@ n@ lt
+t1b:
+  A@ j@ n@ mul i@ add array_get tmp@ j@ array_get mul s@ add s!
+  ret j@ 1 add j!
+; mv2: tmp[i] = sum_j A[i*n+j] * v[j]
+mv2: i!
+  0 s! 0 j!
+  'm2c 'm2b while
+  tmp@ i@ s@ array_set
+  ret 0
+m2c:
+  ret j@ n@ lt
+m2b:
+  A@ i@ n@ mul j@ add array_get v@ j@ array_get mul s@ add s!
+  ret j@ 1 add j!
+; tm2: u[i] = sum_j A[j*n+i] * tmp[j]
+tm2: i!
+  0 s! 0 j!
+  't2c 't2b while
+  u@ i@ s@ array_set
+  ret 0
+t2c:
+  ret j@ n@ lt
+t2b:
+  A@ j@ n@ mul i@ add array_get tmp@ j@ array_get mul s@ add s!
+  ret j@ 1 add j!
+dots: k!
+  u@ k@ array_get v@ k@ array_get mul uvt@ add uvt!
+  v@ k@ array_get v@ k@ array_get mul vvt@ add vvt!
+  ret 0

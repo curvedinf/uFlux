@@ -1,3 +1,4 @@
+; basic arithmetic, logic, printing
 10 3 div print
 10 3 rem print
 10 3 eq print
@@ -9,6 +10,10 @@
 1 4 shl print
 5 bnot print
 2.5 2.0 div print
+2 3 pow print
+9 sqrt print
+2 2 lte print
+2 2 gte print
 1 print
 2 print
-list 1 push 2 push 3 push len print
+list 1 append 2 append 3 append length print

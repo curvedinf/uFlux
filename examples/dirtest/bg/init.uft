@@ -1,6 +1,6 @@
 ; bg/init.uft — auto-spawned as a thread before main starts
 ; Creates a channel, publishes it so main can find it, then loops.
-16 chan ^cq!
+16 channel ^cq!
 'cond 'body while
 "bg exiting" print
 0 ret
@@ -10,8 +10,8 @@ pub bg_chan:
   ^cq@ ret
 
 cond:
-  ^cq@ deq msg! msg@
+  ^cq@ dequeue msg! msg@
   ret
 body:
-  msg@ "bg got: %s" fmt print
+  msg@ "bg got: %s" format print
   0 ret

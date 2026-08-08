@@ -3,34 +3,34 @@ dict d!
 d@ "a" 1 set
 d@ "b" 2 set
 d@ "a" get print
-d@ "zz" getq print
-d@ "b" has print
-d@ "zz" has print
-d@ len print
-d@ keys len print
-d@ "a" del
-d@ "a" has print
+d@ "zz" get_or_zero print
+d@ "b" contains print
+d@ "zz" contains print
+d@ length print
+d@ keys length print
+d@ "a" remove
+d@ "a" contains print
 list l!
-l@ 10 push 20 push 30 push l!
+l@ 10 append 20 append 30 append l!
 l@ 0 get print
 l@ 2 get print
-l@ 9 getq print
-l@ 1 has print
+l@ 9 get_or_zero print
+l@ 1 contains print
 l@ 1 99 set
 l@ 1 get print
 "hello" 1 get print
-"hello" "ell" has print
-"hello" len print
-"foobar" 1 2 getq print
+"hello" "ell" contains print
+"hello" length print
+"foobar" 1 2 get_or_zero print
 struct P { x:int, y:int }
 _obj P p!
 p@ "x" 42 set
 p@ "x" get print
-p@ "y" getq print
-p@ "x" has print
-p@ keys len print
-p@ typeof print
-"str" typeof print
-5 typeof print
-l@ typeof print
-d@ typeof print
+p@ "y" get_or_zero print
+p@ "x" contains print
+p@ keys length print
+p@ type_of print
+"str" type_of print
+5 type_of print
+l@ type_of print
+d@ type_of print

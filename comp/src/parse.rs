@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::lex::*;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 // FNV-1a 64 over bytes (matches uf_fnv in the C prelude)
 pub fn fnv64(s: &str) -> i64 {
@@ -39,9 +39,25 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
     let mut macros: HashMap<String, Vec<Tok>> = HashMap::new();
     let imports: Vec<Import> = Vec::new();
     // v12: destructuring bind helpers
-    fn is_multi_return(ins: Option<&Ins>) -> bool {
-        matches!(ins, Some(Ins::Simple(name)) if matches!(*name,
-            "op_sh" | "op_try" | "op_retry" | "op_match" | "op_scan" | "op_next"))
+    fn is_multi_return(ins: Option<&Ins>, q: &VecDeque<Tok>) -> bool {
+        match ins {
+            // v13: a bind-run of >=2 (the current bind plus at least one more
+            // in the queue) after a `_call` destructures the callee's returned
+            // list (multi-value ret); a lone trailing bind stays plain
+            Some(Ins::Call(_)) => {
+                let mut n = 0usize;
+                for t in q.iter().take(8) {
+                    if is_bind(t) {
+                        n += 1;
+                    } else {
+                        break;
+                    }
+                }
+                n >= 1
+            }
+            _ => matches!(ins, Some(Ins::Simple(name)) if matches!(*name,
+                "op_sh" | "op_try" | "op_retry" | "op_match" | "op_scan" | "op_next")),
+        }
     }
     fn is_bind(t: &Tok) -> bool {
         matches!(t, Tok::LocalSet(_) | Tok::SetV(_) | Tok::Discard)
@@ -98,17 +114,66 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
         entry_label: None,
         local_counts: HashMap::new(),
         local_names: HashMap::new(),
+        label_params: HashMap::new(),
+        param_pcs: HashMap::new(),
     };
     let mut q: VecDeque<Tok> = toks.into();
     let mut pending_export: Option<String> = None;
     let mut pending_pub = false;
     let mut pending_method: Option<String> = None;
     let mut weave_ctr = 0usize;
-    let mut cur_weave: Vec<(String, Vec<String>, i64)> = Vec::new();
+    let mut cur_weave: Vec<(String, Vec<Param>, i64)> = Vec::new();
     let mut expand_depth = 0usize;
+    // v13: `ret` is a prefix keyword whose operand is the following expression
+    // tokens (e.g. `ret 0`, `ret a@ b@ add`, `ret out@ err@ code@`). The parser
+    // rewrites `ret X...` into `X... ret` by pulling the operand tokens off the
+    // queue and re-pushing them ahead of the RET. The operand runs until the
+    // next statement boundary (label, directive, task, another ret, or a
+    // literal closer). In valid v13 code the ret is the last statement of its
+    // body, so the operand is exactly the return expression.
+    fn is_stmt_boundary(t: &Tok) -> bool {
+        is_hard_boundary(t)
+            || matches!(t, Tok::List(_) | Tok::Dict(_))
+    }
+    fn is_hard_boundary(t: &Tok) -> bool {
+        matches!(t,
+            Tok::LabelDef(_) | Tok::Task { .. } | Tok::TaskEnd(_) | Tok::Wrun(_)
+            | Tok::Entry | Tok::MacroDef(..) | Tok::StructDef(..) | Tok::Import(_)
+            | Tok::Export(_) | Tok::Use(_) | Tok::Mod(_) | Tok::Pub
+            | Tok::Extern(_) | Tok::Method(_)
+            // control flow ends the ret's operand expression: `ret` is the
+            // last statement, and `expr if_else ret` (v12 style) covers
+            // branch-returning rets via the real-stack fallback
+            | Tok::Op("RET" | "IF" | "IFELSE" | "WHILE" | "FOR")
+        ) || matches!(t, Tok::Ident(n) if n.starts_with('@'))
+    }
     while let Some(t) = q.pop_front() {
         match t {
-            Tok::Op("RET") => p.ins.push(Ins::Ret),
+            Tok::Op("RET") => {
+                let mut operand: Vec<Tok> = Vec::new();
+                let mut first = true;
+                while let Some(t2) = q.front() {
+                    if is_hard_boundary(t2) || (!first && matches!(t2, Tok::List(_) | Tok::Dict(_))) {
+                        break;
+                    }
+                    first = false;
+                    operand.push(q.pop_front().unwrap());
+                }
+                if operand.is_empty() {
+                    // bare ret — return null
+                    p.ins.push(Ins::Ret);
+                } else {
+                    // rewrite `ret X...` into `flush X... ret`: flush the
+                    // values pushed before the operand to the real stack, so
+                    // the ret's count rule sees only the values the operand
+                    // itself leaves (strays get drained at the return)
+                    q.push_front(Tok::Op("RET"));
+                    for t2 in operand.into_iter().rev() {
+                        q.push_front(t2);
+                    }
+                    q.push_front(Tok::Ident("@flush".to_string()));
+                }
+            }
             Tok::Op("FOR") => p.ins.push(Ins::For),
             Tok::Op("IF") => p.ins.push(Ins::If),
             Tok::Op("IFELSE") => p.ins.push(Ins::IfElse),
@@ -149,7 +214,7 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
                 _ => unreachable!(),
             },
             Tok::SetV(n) => {
-                if is_multi_return(p.ins.last()) {
+                if is_multi_return(p.ins.last(), &q) {
                     // v12 destructuring bind: ^name! after a multi-return op
                     let pattern = collect_destructure(Bind::Global(n), &mut q);
                     emit_destructure(pattern, &mut p, &mut dtemp_ctr);
@@ -167,7 +232,7 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
                 p.ins.push(Ins::GetV(n));
             }
             Tok::LocalSet(n) => {
-                if is_multi_return(p.ins.last()) {
+                if is_multi_return(p.ins.last(), &q) {
                     // v12 destructuring bind: name! after a multi-return op
                     let pattern = collect_destructure(Bind::Local(n), &mut q);
                     emit_destructure(pattern, &mut p, &mut dtemp_ctr);
@@ -179,7 +244,7 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
                 p.ins.push(Ins::LocalGet(n));
             }
             Tok::Discard => {
-                if is_multi_return(p.ins.last()) {
+                if is_multi_return(p.ins.last(), &q) {
                     // v12 destructuring bind: leading _! after a multi-return op
                     let pattern = collect_destructure(Bind::Discard, &mut q);
                     emit_destructure(pattern, &mut p, &mut dtemp_ctr);
@@ -232,19 +297,20 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
                 macros.insert(n, body);
             }
             Tok::StructDef(n, fields) => {
+                // v13: obj fields are stored as full Cells (16 bytes: tag +
+                // int64 payload), so the layout strides by sizeof(Cell) —
+                // 8-byte strides made adjacent fields overlap.
                 let mut off = 0i64;
                 let mut fs = Vec::new();
                 for (fname, fty) in &fields {
                     let sz = match type_id(fty) {
-                        Some(3) => 1,
-                        Some(_) => 8,
+                        Some(_) => 16,
                         None => match structs.get(fty) {
                             Some((_, tsz, _)) => *tsz,
                             None => panic!("STRUCT {}: unknown field type {}", n, fty),
                         },
                     };
-                    // natural alignment up to 8
-                    let align = sz.min(8);
+                    let align = sz.min(16);
                     off = (off + align - 1) / align * align;
                     fs.push((fname.clone(), off));
                     off += sz;
@@ -254,12 +320,30 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
             }
             Tok::Method(tname) => pending_method = Some(tname),
             Tok::Sys(n) => p.ins.push(Ins::Sys(n)),
-            Tok::Task { name, inputs, count, body } => {
+            Tok::Task { name, count, body } => {
                 // v10 fanout: count literal 1..64; count > 1 requires exactly
-                // one input (checked at WRUN where the input is resolved)
+                // one input (checked at RUN where the input is resolved)
                 if let Some(c) = count {
                     if !(1..=64).contains(&c) {
                         panic!("WEAVE: task {} worker count {} out of range 1..64", name, c);
+                    }
+                }
+                // v13: leading binding tokens in the body are the task's input
+                // bindings (task name! makes that task's result a parameter)
+                let mut inputs: Vec<Param> = Vec::new();
+                let mut body: Vec<Tok> = body;
+                loop {
+                    match body.first() {
+                        Some(Tok::LocalSet(nm)) => {
+                            inputs.push(Param::Local(nm.clone()));
+                            body.remove(0);
+                        }
+                        Some(Tok::SetV(nm)) => {
+                            inputs.push(Param::Global(nm.clone()));
+                            body.remove(0);
+                        }
+                        Some(Tok::Discard) => panic!("WEAVE: task {} input `_!` needs a task name", name),
+                        _ => break,
                     }
                 }
                 let skip = format!("__wskip{}", weave_ctr);
@@ -270,6 +354,21 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
                 // so two tasks may reuse the same v-names
                 let prefix = format!("{}/", name);
                 let body = prefix_task_labels(body, &prefix);
+                // input bindings are emitted reversed (guarded param pops)
+                for (k, par) in inputs.iter().rev().enumerate() {
+                    let pc = p.ins.len();
+                    match par {
+                        Param::Local(nm) => p.ins.push(Ins::LocalSet(nm.clone())),
+                        Param::Global(nm) => {
+                            if !p.vars.contains(nm) {
+                                p.vars.push(nm.clone());
+                            }
+                            p.ins.push(Ins::SetV(nm.clone()));
+                        }
+                        Param::Discard => unreachable!(),
+                    }
+                    p.param_pcs.insert(pc, inputs.len() - 1 - k);
+                }
                 q.push_front(Tok::TaskEnd(skip));
                 for t in body.into_iter().rev() {
                     q.push_front(t);
@@ -277,25 +376,46 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
                 cur_weave.push((name, inputs, count.unwrap_or(1)));
             }
             Tok::TaskEnd(skip) => {
-                p.ins.push(Ins::Ret);
+                // v13: the task body ends with the user's explicit `ret`;
+                // the skip label just marks where the next unit begins
                 p.labels.insert(skip, p.ins.len());
             }
-            Tok::Wrun => {
+            Tok::List(body) => {
+                let mut lbody = body;
+                lbody.push(Tok::Ident("@listlit".to_string()));
+                lbody.insert(0, Tok::Ident("@liststart".to_string()));
+                for t in lbody.into_iter().rev() {
+                    q.push_front(t);
+                }
+            }
+            Tok::Dict(body) => {
+                let mut dbody = body;
+                dbody.push(Tok::Ident("@dictlit".to_string()));
+                dbody.insert(0, Tok::Ident("@dictstart".to_string()));
+                for t in dbody.into_iter().rev() {
+                    q.push_front(t);
+                }
+            }
+            Tok::Wrun(terminal) => {
                 // static DAG checks: inputs must name tasks in this weave; acyclic
                 let names: Vec<&String> = cur_weave.iter().map(|(n, _, _)| n).collect();
                 let mut metas: Vec<WeaveMeta> = Vec::new();
                 for (n, ins, count) in &cur_weave {
                     let mut idxs = Vec::new();
                     for inp in ins {
-                        match names.iter().position(|x| *x == inp) {
+                        let inp_name = match inp {
+                            Param::Local(x) | Param::Global(x) => x,
+                            Param::Discard => unreachable!(),
+                        };
+                        match names.iter().position(|x| *x == inp_name) {
                             Some(i) => idxs.push(i),
-                            None => panic!("WEAVE: task {} has unknown input {}", n, inp),
+                            None => panic!("WEAVE: task {} has unknown input {}", n, inp_name),
                         }
                     }
                     if *count > 1 && idxs.is_empty() {
                         panic!("WEAVE: fanout task {} ({} workers) must have at least one input", n, count);
                     }
-                    metas.push(WeaveMeta { name: n.clone(), pc: n.clone(), inputs: idxs, count: *count });
+                    metas.push(WeaveMeta { name: n.clone(), pc: *p.labels.get(n).unwrap_or(&0), inputs: idxs, count: *count });
                 }
                 // Kahn topo: cycle check (execution order is the scheduler's job)
                 let mut done = vec![false; metas.len()];
@@ -313,6 +433,56 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
                 }
                 if done.iter().any(|d| !d) {
                     panic!("WEAVE: cycle in task DAG");
+                }
+                // v13: `run <name>` names a terminal task. Tasks not reachable
+                // from the terminal become orphans: they stay in scope (their
+                // labels remain callable) but are dropped from the auto-run
+                // DAG. The terminal's result is left on the stack after run.
+                let mut terminal_idx: Option<usize> = None;
+                if let Some(t) = &terminal {
+                    match names.iter().position(|x| *x == t) {
+                        Some(i) => terminal_idx = Some(i),
+                        None => panic!("WEAVE: run names unknown task {}", t),
+                    }
+                }
+                if let Some(ti) = terminal_idx {
+                    // reverse BFS from the terminal over input edges
+                    let mut reachable = vec![false; metas.len()];
+                    reachable[ti] = true;
+                    let mut changed = true;
+                    while changed {
+                        changed = false;
+                        for (i, m) in metas.iter().enumerate() {
+                            if !reachable[i] {
+                                continue;
+                            }
+                            for &j in &m.inputs {
+                                if !reachable[j] {
+                                    reachable[j] = true;
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    let mut kept: Vec<usize> = (0..metas.len()).filter(|&i| reachable[i]).collect();
+                    // move the terminal last so the codegen pushes its result
+                    kept.retain(|&i| i != ti);
+                    kept.push(ti);
+                    let mut remap = vec![0usize; metas.len()];
+                    for (k, &i) in kept.iter().enumerate() {
+                        remap[i] = k;
+                    }
+                    let mut metas2: Vec<WeaveMeta> = Vec::new();
+                    for &i in &kept {
+                        let m = &metas[i];
+                        metas2.push(WeaveMeta {
+                            name: m.name.clone(),
+                            pc: m.pc.clone(),
+                            inputs: m.inputs.iter().map(|&j| remap[j]).collect(),
+                            count: m.count,
+                        });
+                    }
+                    metas = metas2;
                 }
                 if !metas.is_empty() {
                     for m in &metas {
@@ -338,13 +508,66 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
                 if let Some(x) = pending_export.take() {
                     p.exports.push((x, n));
                 }
+                // v13: consume a leading run of binding tokens as parameter
+                // declarations (name! / ^name! / _!). Bindings are emitted as
+                // instructions in REVERSE order so the first declared binding
+                // pops the first cell the caller pushed (the caller's stack
+                // holds the args in push order, last on top).
+                let mut params: Vec<Param> = Vec::new();
+                while let Some(t2) = q.front() {
+                    match t2 {
+                        Tok::LocalSet(name) => {
+                            params.push(Param::Local(name.clone()));
+                            q.pop_front();
+                        }
+                        Tok::SetV(name) => {
+                            params.push(Param::Global(name.clone()));
+                            q.pop_front();
+                        }
+                        Tok::Discard => {
+                            params.push(Param::Discard);
+                            q.pop_front();
+                        }
+                        _ => break,
+                    }
+                }
+                if !params.is_empty() {
+                    p.label_params.insert(p.ins.len(), params.clone());
+                }
+                for (k, par) in params.iter().rev().enumerate() {
+                    let pc = p.ins.len();
+                    match par {
+                        Param::Local(name) => p.ins.push(Ins::LocalSet(name.clone())),
+                        Param::Global(name) => {
+                            if !p.vars.contains(name) {
+                                p.vars.push(name.clone());
+                            }
+                            p.ins.push(Ins::SetV(name.clone()));
+                        }
+                        Param::Discard => p.ins.push(Ins::Simple("op_drop")),
+                    }
+                    // guard offset: the k-th pop (0-based, reversed emission)
+                    // pops only when the caller left (arity - k) cells; see
+                    // the guard in gen.rs
+                    p.param_pcs.insert(pc, params.len() - 1 - k);
+                }
             }
             Tok::Entry => {
                 p.labels.insert("entry".to_string(), p.ins.len());
                 p.entry_label = Some("entry".to_string());
             }
             Tok::Ident(n) => {
-                if let Some(rest) = n.strip_prefix("@sizeof:") {
+                if n == "@flush" {
+                    p.ins.push(Ins::Flush);
+                } else if n == "@liststart" {
+                    p.ins.push(Ins::ListStart);
+                } else if n == "@dictstart" {
+                    p.ins.push(Ins::DictStart);
+                } else if n == "@listlit" {
+                    p.ins.push(Ins::ListLit);
+                } else if n == "@dictlit" {
+                    p.ins.push(Ins::DictLit);
+                } else if let Some(rest) = n.strip_prefix("@sizeof:") {
                     if let Some(id) = type_id(rest) {
                         p.ins.push(Ins::PushI(if id == 3 { 1 } else { 8 }));
                     } else if let Some((_, tsz, _)) = structs.get(rest) {
@@ -391,6 +614,39 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
         }
     }
     let _ = imports;
+    // v13: every label body must end with `ret` (a path that falls off the end
+    // of a label is a compile error). Bodies consisting only of break/cont are
+    // loop-exit continuations and are exempt; internal weave-skip regions end
+    // with a Goto and are exempt (no user code may end a body with a jump).
+    {
+        let mut pcs: Vec<(String, usize)> = p.labels.iter().map(|(n, &pc)| (n.clone(), pc)).collect();
+        pcs.sort_by_key(|(_, pc)| *pc);
+        for (i, (name, pc)) in pcs.iter().enumerate() {
+            // internal weave-skip labels are not user bodies
+            if name.starts_with("__wskip") {
+                continue;
+            }
+            let end = pcs.get(i + 1).map(|(_, e)| *e).unwrap_or(p.ins.len());
+            if end <= *pc {
+                continue; // empty label (alias)
+            }
+            let last = end - 1;
+            if std::env::var("UF_DEBUG_PARSE").is_ok() {
+                eprintln!("retcheck label={} pc={} end={} lastins={:?}", name, pc, end, p.ins.get(last));
+            }
+            // Terminating instructions never fall off the end: ret returns,
+            // break/cont unwind a loop, Goto jumps, and if_else transfers to
+            // one of two bodies. if/while/for fall through on some path, so a
+            // body may not end with them.
+            match &p.ins[last] {
+                Ins::Ret | Ins::Break | Ins::Cont | Ins::Goto(_) | Ins::IfElse => {}
+                _ => panic!(
+                    "label '{}': body must end with `ret` — falling off the end of a label is a v13 compile error",
+                    name
+                ),
+            }
+        }
+    }
     // v10: break/cont outside a loop are compile errors. A "function" here is
     // the instruction region starting at a label used as a code address
     // (CALL/ADDR/weave task entry); a loop is a FOR/WHILE whose body address
@@ -430,9 +686,7 @@ pub fn parse(toks: Vec<Tok>, structs: &mut StructMap) -> Parsed {
                 }
                 Ins::Weave(ms) => {
                     for m in ms {
-                        if let Some(t) = resolve(&m.pc) {
-                            entries.insert(t);
-                        }
+                        entries.insert(m.pc);
                     }
                 }
                 Ins::For => {
@@ -519,9 +773,7 @@ pub fn resolve_locals(p: &mut Parsed) {
     for ins in &p.ins {
         if let Ins::Weave(tasks) = ins {
             for t in tasks {
-                if let Some(&pc) = p.labels.get(&t.pc) {
-                    call_entries.insert(pc);
-                }
+                call_entries.insert(t.pc);
             }
         }
     }
@@ -674,6 +926,8 @@ pub fn merge_tus(tus: Vec<Parsed>, mods: Vec<String>, init_flags: &[bool]) -> Pa
         entry_label: None,
         local_counts: HashMap::new(),
         local_names: HashMap::new(),
+        label_params: HashMap::new(),
+        param_pcs: HashMap::new(),
     };
     for (tu_idx, (tu, defmod)) in tus.into_iter().zip(mods).enumerate() {
         let modname = tu.modname.clone().unwrap_or(defmod);
@@ -720,12 +974,17 @@ pub fn merge_tus(tus: Vec<Parsed>, mods: Vec<String>, init_flags: &[bool]) -> Pa
                 Ins::LocalGetI(id) => Ins::LocalGetI(*id),
                 Ins::Extern(n) => Ins::Extern(n.clone()),
                 Ins::Send => Ins::Send,
+                Ins::Flush => Ins::Flush,
+                Ins::ListStart => Ins::ListStart,
+                Ins::DictStart => Ins::DictStart,
+                Ins::ListLit => Ins::ListLit,
+                Ins::DictLit => Ins::DictLit,
                 Ins::Weave(metas) => Ins::Weave(
                     metas
                         .iter()
                         .map(|t| WeaveMeta {
                             name: format!("{}__{}", modname, t.name),
-                            pc: local(&t.pc),
+                            pc: t.pc + off,
                             inputs: t.inputs.clone(),
                             count: t.count,
                         })
@@ -775,6 +1034,13 @@ pub fn merge_tus(tus: Vec<Parsed>, mods: Vec<String>, init_flags: &[bool]) -> Pa
                 m.entry_label = Some(format!("{}:{}", modname, el));
             }
         }
+        // v13: label params and param-pop pcs shift with the TU offset
+        for (&pc, ps) in &tu.label_params {
+            m.label_params.insert(pc + off, ps.clone());
+        }
+        for (&pc, &k) in &tu.param_pcs {
+            m.param_pcs.insert(pc + off, k);
+        }
     }
     resolve_locals(&mut m);
     m
@@ -787,6 +1053,12 @@ pub fn simple_ins(name: &'static str) -> Ins {
         "SUB" => "op_sub",
         "MUL" => "op_mul",
         "AND" => "op_and",
+        "POW" => "op_pow",
+        "SQRT" => "op_sqrt",
+        "LTE" => "op_lte",
+        "GTE" => "op_gte",
+        "SHUTDOWN" => "op_shutdown",
+        "DROP" => "op_drop",
         "SHR" => "op_shr",
         "INC" => "op_inc",
         "DEC" => "op_dec",

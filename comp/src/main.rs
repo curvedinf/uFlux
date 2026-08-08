@@ -196,7 +196,7 @@ Programs are terse (low token count), fast, and reliable — designed for LLM-au
 Cells are untyped 64-bit values at runtime — ints, floats, and pointers freely interconvert.
 Type inference happens at compile time where possible, but types are not enforced at the language level.
 
-The data stack is an implementation detail. Source code reasons about **named local/global variables**, **literal constants**, and **the return value of the immediately preceding op**. There are no stack-manipulation primitives (`dup`, `drop`, `swp`, `ovr`, `pick`) in v12.
+The data stack is an implementation detail. Source code reasons about **named local/global variables**, **literal constants**, and **the return value of the immediately preceding op**. There are no stack-manipulation primitives (`dup`, `drop`, `swp`, `ovr`, `pick`) in v13.
 
 > **Maintenance:** When `uf` is updated, regenerate this file with `uf --skill` to refresh the opcode list.
 
@@ -226,14 +226,16 @@ The compiler auto-detects the encoding per file: any character at or above U+130
 - Comments: `;` to end of line.
 - Numbers: self-evaluating. Negative numbers allowed in text mode.
 - Strings: `"hello\n"` — escapes: \n \t \r \0 \\ \"
-- Variables: `x!` (store), `x@` (fetch) for locals; `^x!` / `^x@` for globals; `x++` / `x+=` increment/accumulate. `x!` and `^x!` are pass-through in v12 (leave the value for the next op).
-- Labels: `name:` defines; `'name` pushes address; `_call name` calls.
-- Control flow: `if` (cond `'label`), `ifelse` (cond `'then_label 'else_label`), `while` (`'cond_label 'body_label`), `for` (count `'body_label`); `break`/`cont` in loop bodies only.
+- Variables: `x!` (store), `x@` (fetch) for locals; `^x!` / `^x@` for globals; `x++` / `x+=` increment/accumulate. `x!` and `^x!` are pass-through (leave the value for the next op).
+- Labels: `name:` defines; `'name` pushes address; `_call name` calls. Labels may declare input parameters: `add2: a! b!` then `3 4 _call add2`.
+- Control flow: `if` (cond `'label`), `if_else` (cond `'then_label 'else_label`), `while` (`'cond_label 'body_label`), `for` (count `'body_label`); `break`/`continue` in loop bodies only.
+- Every label body must end with `ret` (returns null when bare; `ret expr` returns the value; `ret a b c` returns a list).
+- Container literals: `[1 2 3]` list, `{{ "a" 1 }}` dict, `[1 2] int array` typed array.
 - Entry point: `entry:` marks where execution starts (implicit jump from pc 0).
-- Printing: `print` consumes the top-of-stack value and prints a type-aware, recursive representation. Use `fmt` to build a formatted string: `x "v=%d" fmt print`.
-- Shell: `sh` takes a command string, pushes **3 values**: stdout, stderr, exit-status. Bind them with destructuring: `"cmd" sh out! err! status!`.
-- Destructuring bind: multi-return ops (`sh`, `match`, `next`, `scan`, `try`) return a list; extract slots with `op a! b! _! c!`. Excess binds receive `null`; unbound trailing values are auto-discarded.
-- Auto-discard: unbound values at statement/line boundaries, before `ret`, and at task-body ends are silently discarded.
+- Printing: `print` consumes the top-of-stack value and prints a type-aware, recursive representation. Use `format` to build a formatted string: `x "v=%d" format print`.
+- Shell: `shell` takes a command string, pushes **3 values**: stdout, stderr, exit-status. Bind them with destructuring: `"cmd" shell out! err! status!`.
+- Destructuring bind: multi-return ops (`shell`, `regex_match`, `next`, `scan`, `try`, and any `_call` whose label returns a list) return a list; extract slots with `op a! b! _! c!`. Excess binds receive `null`.
+- Stack draining: when a label/task/callback returns, its data stack is drained back to the caller's saved pointer and the single `ret` value is pushed.
 - Modules: `use "name"` links -l<name> and loads mods/<name>.ufm manifest.
 - FFI: `import c"fn"(arg_types)->ret` declares C functions.
 
@@ -258,39 +260,41 @@ Use structured control flow instead:
 **There are NO inline block keywords.** `else` and `then` are NOT opcodes. You cannot write Forth-style `if ... else ... then`. You MUST define separate labels and pass their addresses:
 ```
 cond 'yes if                         ; one-branch
-cond 'then_label 'else_label ifelse  ; two-branch
+cond 'then_label 'else_label if_else  ; two-branch
 ```
 Where `yes:`, `then_label:`, `else_label:` are labels ending with `ret`.
 
-**`eq` compares ints and floats by value, pointers by identity.** String comparison with `eq` is unreliable — use `match`, `starts`, `ends`, or `find` for string equality. Use `seq`/`sne` for strict equality.
+**`eq` compares ints and floats by value, pointers by identity.** String comparison with `eq` is unreliable — use `regex_match`, `starts_with`, `ends_with`, or `find` for string equality. Use `structural_equal`/`structural_not_equal` for strict equality.
 
-**`split` on text with a trailing separator creates an empty trailing element.** For example `"a\nb\n" "\n" split` produces `["a", "b", ""]`. Filter empties: `lines 'nonempty filter` where `nonempty: len 0 gt ret`.
+**`split` on text with a trailing separator creates an empty trailing element.** For example `"a\nb\n" "\n" split` produces `["a", "b", ""]`. Filter empties: `lines 'nonempty filter` where `nonempty: length 0 gt ret`.
 
 **`split` is destructive** — it writes NULs into the source string in-place. Copy the string first if you need the original afterwards.
 
-**`rsplit` (regex split) may produce unexpected results.** Prefer `split` (literal separator) which is reliable.
+**`regex_split` may produce unexpected results.** Prefer `split` (literal separator) which is reliable.
 
-**`addto` argument order is `dict key amount`.** Not amount-first: `d@ "x" 5 addto`.
+**`add_to` argument order is `dict key amount`.** Not amount-first: `d@ "x" 5 add_to`.
 
-**`spit` argument order is `path str`** — path is FIRST, content is SECOND (unlike shell redirection).
+**`write_file` argument order is `path str`** — path is FIRST, content is SECOND (unlike shell redirection).
 
-**`sh` idiom to keep only stdout:** `"cmd" sh out! _! _!` (binds stderr and status to discard slots, leaves stdout in `out`).
+**`shell` idiom to keep only stdout:** `"cmd" shell out! _! _!` (binds stderr and status to discard slots, leaves stdout in `out`).
 
-**Use globals (`^x!`/`^x@`) for state shared across labels** called via `if`/`for`/`filter`/`ffold` callbacks. Locals (`x!`/`x@`) are scoped to the calling function and may not be visible inside callback labels.
+**Use globals (`^x!`/`^x@`) for state shared across labels** called via `if`/`for`/`filter`/`file_fold_lines` callbacks. Locals (`x!`/`x@`) are scoped to the calling function and may not be visible inside callback labels.
 
 ## Container construction
 
-There is no `{{}}` syntax. Create containers with opcodes:
+Literals and opcodes both work:
 
 | Construct | Syntax | Notes |
 |-----------|--------|-------|
-| Empty list | `list` | push then: `list 42 push` |
-| Empty dict | `dict` | put then: `dict "key" val set` |
-| Typed array | `len type arr` | type = type id: int=0, float=1, ptr=2, byte=3 |
-| Tensor | `len type tensor` | same as arr |
+| Empty list | `[]` or `list` | literal is preferred |
+| Empty dict | `{{}}` or `dict` | literal is preferred |
+| List | `[1 2 3]` | element expressions net exactly one cell each |
+| Dict | `{{ "a" 1 "b" 2 }}` | alternating key/value; even count required |
+| Typed array | `[0 1 2] int array` or `len int array` | type = type id: int=0, float=1, ptr=2, byte=3 |
+| Tensor | `[1.0 2.0] float tensor` | same as array |
 | String | `"hello\n"` or `_str` | bare quoted strings are preferred |
 
-`push` returns a (possibly reallocated) handle — always keep the result: `lst 42 push lst!`
+`append` returns a (possibly reallocated) handle — always keep the result: `lst 42 append lst!`
 
 ## Key opcode signatures
 
@@ -298,23 +302,23 @@ Common ops with non-obvious stack signatures:
 
 | Op | Stack effect | Notes |
 |----|-------------|-------|
-| `sh` | `cmd → [stdout,stderr,status]` | 3 return values as a list; `/bin/sh -c` |
+| `shell` | `cmd → [stdout,stderr,status]` | 3 return values as a list; `/bin/sh -c` |
 | `print` | `v →` | type-aware recursive representation; top-level strings print raw |
-| `fmt` | `args... fmt → str` | build a formatted string, then `print` it |
+| `format` | `args... fmt → str` | build a formatted string, then `print` it |
 | `split` | `str sep → list` | literal separator (empty sep: dies); **destructive** |
 | `join` | `list sep → str` | |
-| `slurp` | `path → str` | whole file |
-| `spit` | `path str →` | create/truncate |
-| `arr` | `len type → h` | type: int=0 float=1 ptr=2 byte=3 |
+| `read_file` | `path → str` | whole file |
+| `write_file` | `path str →` | create/truncate |
+| `array` | `[len_or_list] type → h` | list form copies elements |
 | `iter` | `h → it` | create cursor from any collection |
 | `next` | `it → [value, more]` | `more`=0 means exhausted (`value` is 0) |
 | `collect` | `it → list` | drain iterator into a list |
-| `ffold` | `path init fn_addr → acc` | streaming reduce over file lines; fn is `(acc line → acc)` |
-| `feach` | `path fn_addr →` | call fn per line; fn is `(line → )`, stops early if fn returns 0 |
+| `file_fold_lines` | `path init fn_addr → acc` | streaming reduce over file lines; fn is `(acc line → acc)` |
+| `file_each_line` | `path fn_addr →` | call fn per line; fn is `(line → )`, stops early if fn returns 0 |
 | `for` | `count body_addr →` | pushes loop index k per iteration |
 | `filter` | `list pred_addr → list'` | pred is `(elem → 0/1)` |
-| `vmap` | `arr fn_addr → arr'` | fn is `(elem → elem')` |
-| `vfold` | `arr init fn_addr → acc` | fn is `(acc elem → acc)` |
+| `array_map` | `arr fn_addr → arr'` | fn is `(elem → elem')` |
+| `array_reduce` | `arr init fn_addr → acc` | fn is `(acc elem → acc)` |
 
 ## Worked examples
 

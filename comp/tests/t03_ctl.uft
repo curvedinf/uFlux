@@ -1,12 +1,11 @@
-; if / ifelse
+; if / if_else
 1 'yes if
 0 'yes if
-1 'then 'els ifelse
-0 'then 'els ifelse
+1 'then 'els if_else
+0 'then 'els if_else
 ; while with break/cont
-; v12: break condition (i==7) folded into while-cond (break can't live in
-; an if sub-body — the compiler rejects break/cont outside a loop body).
-; continue condition (i==3) handled via ifelse that skips the print.
+; break condition (i==7) folded into while-cond; continue condition (i==3)
+; handled via if_else that skips the print.
 0 i!
 'i_c 'i_b while
 "" print
@@ -15,14 +14,14 @@
 "" print
 "done" print
 ret
-; --- quotation bodies (all continuations of the top-level _call body) ---
+; --- quotation bodies (all continuations of the top-level body) ---
 yes: "YES" print ret
 then: "THEN" print ret
 els: "ELS" print ret
 i_c: i@ inc i! i@ 10 lt i@ 7 eq not and ret
-i_b: i@ 3 eq not 'pr 'np ifelse 0 ret
+i_b: i@ 3 eq not 'pr 'np if_else 0 ret
 pr: i@ print ret
 np: 0 ret
-fbody: k! k@ 1 eq 'fnp 'fpr ifelse ret
+fbody: k! k@ 1 eq 'fnp 'fpr if_else ret
 fpr: k@ print 0 ret
 fnp: 0 ret

@@ -1,41 +1,41 @@
-; build _arr [0..9]
+; build int array [0..9]
 0 10 range lst!
-lst@ len _arr int a!
-lst@ len 'cp for
-a@ 2 vadd vsum print
-a@ vsum print
-a@ vmean print
-a@ vmin print
-a@ vmax print
+lst@ length int array a!
+lst@ length 'cp for
+a@ 2 scalar_add sum print
+a@ sum print
+a@ mean print
+a@ min print
+a@ max print
 a@ a2!
-a2@ veadd vsum print
+a2@ array_add sum print
 a@ a2!
-a2@ vemul vsum print
-a@ 1 vadd a1!
-a1@ a1@ vediv vsum print
-a@ 5 veq vcount print
-a@ 4 vgt vcount print
-a@ 4 vgt a@ 7 vlt vand vcount print
-a@ 4 vgt a@ 7 vlt vor vcount print
+a2@ array_mul sum print
+a@ 1 scalar_add a1!
+a1@ a1@ array_div sum print
+a@ 5 scalar_eq bitmap_count print
+a@ 4 scalar_gt bitmap_count print
+a@ 4 scalar_gt a@ 7 scalar_lt bitmap_and bitmap_count print
+a@ 4 scalar_gt a@ 7 scalar_lt bitmap_or bitmap_count print
 a@ a4!
-a4@ a4@ 4 vgt vgather vsum print
-a@ 5 vge vnot vcount print
-a@ 'sq vmap vsum print
-a@ 0 'acc vfold print
+a4@ a4@ 4 scalar_gt array_gather sum print
+a@ 5 scalar_gte bitmap_not bitmap_count print
+a@ 'sq array_map sum print
+a@ 0 'acc array_reduce print
 ; float arr
-lst@ len _arr float f!
-lst@ len 'cp2 for
-f@ 0.5 vadd vsum print
-f@ vmean print
+lst@ length float array f!
+lst@ length 'cp2 for
+f@ 0.5 scalar_add sum print
+f@ mean print
 ; vargsort / vsearchsorted / vwhere
-list 30 push 10 push 20 push s3!
-s3@ len _arr int b!
-s3@ len 'cp3 for
-b@ vargsort idx!
+list 30 append 10 append 20 append s3!
+s3@ length int array b!
+s3@ length 'cp3 for
+b@ array_argsort idx!
 idx@ 0 get print
-b@ 15 vsearchsorted print
+b@ 15 array_search_sorted print
 b@ b1!
-b1@ b1@ b1@ 1 vlt vwhere vsum print
+b1@ b1@ b1@ 1 scalar_lt array_where sum print
 ; sort arr
 b@ sort sb!
 sb@ 0 get print
@@ -43,7 +43,7 @@ sb@ 2 get print
 ret
 ; --- quotation bodies ---
 cp: k! lst@ k@ get v! a@ k@ v@ set ret
-sq: x! x@ x@ * ret
-acc: a! b! a@ b@ + ret
+sq: x! ret x@ x@ mul
+acc: a! b! ret a@ b@ add
 cp2: k! lst@ k@ get v! f@ k@ v@ set ret
 cp3: k! s3@ k@ get v! b@ k@ v@ set ret

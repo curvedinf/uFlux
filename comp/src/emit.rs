@@ -60,23 +60,34 @@ pub fn emit_text(toks: &[Tok]) -> String {
             Tok::Ident(n) => o.push_str(&format!("{} ", n)),
             Tok::LabelDef(n) => o.push_str(&format!("{}: ", n)),
             Tok::Entry => o.push_str("entry: "),
-            Tok::Task { name, inputs, count, body } => {
+            Tok::Task { name, count, body } => {
                 if !in_weave {
                     o.push_str("weave\n  ");
                     in_weave = true;
                 }
-                for i in inputs {
-                    o.push_str(&format!("{} ", i));
-                }
                 if let Some(c) = count {
                     o.push_str(&format!("{} ", c));
                 }
-                o.push_str(&format!("task {} {} endt\n  ", name, emit_text(body)));
+                o.push_str(&format!("task {}: ", name));
+                o.push_str(&emit_text(body));
             }
             Tok::TaskEnd(_) => {}
-            Tok::Wrun => {
-                o.push_str("wrun\n");
+            Tok::Wrun(terminal) => {
+                match terminal {
+                    Some(t) => o.push_str(&format!("run {}\n", t)),
+                    None => o.push_str("run\n"),
+                }
                 in_weave = false;
+            }
+            Tok::List(body) => {
+                o.push_str("[");
+                o.push_str(&emit_text(body));
+                o.push_str("] ");
+            }
+            Tok::Dict(body) => {
+                o.push_str("{ ");
+                o.push_str(&emit_text(body));
+                o.push_str("} ");
             }
         }
     }
@@ -190,27 +201,38 @@ pub fn emit_dense(toks: &[Tok]) -> String {
                 Tok::Ident(n) => o.push_str(&format!("{}", n)),
                 Tok::LabelDef(n) => { sep_v(o); o.push_str(&format!("{}\n", nm(n, names, next))); }
                 Tok::Entry => o.push_str(&format!("{}\n", glyph_of(206))),
-                Tok::Task { name, inputs, count, body } => {
+                Tok::Task { name, count, body } => {
                     if !*weave {
                         o.push_str(&format!("{}\n", glyph_of(81)));
                         *weave = true;
                     }
-                    for i in inputs {
-                        sep_v(o);
-                        o.push_str(&nm(i, names, next));
-                    }
                     if let Some(c) = count {
                         sep_l(o);
                         o.push_str(&lrun(*c as u64));
+                        o.push(' ');
                     }
-                    o.push_str(&format!("{}{}\n", glyph_of(82), nm(name, names, next)));
+                    o.push_str(&format!("{}{}:\n", glyph_of(82), nm(name, names, next)));
                     rec(body, names, next, weave, o);
-                    o.push_str(&format!("{}\n", glyph_of(83)));
                 }
                 Tok::TaskEnd(_) => {}
-                Tok::Wrun => {
-                    o.push_str(&format!("{}\n", glyph_of(84)));
+                Tok::Wrun(terminal) => {
+                    o.push_str(&format!("{}", glyph_of(84)));
+                    if let Some(t) = terminal {
+                        sep_v(o);
+                        o.push_str(&nm(t, names, next));
+                    }
+                    o.push('\n');
                     *weave = false;
+                }
+                Tok::List(body) => {
+                    o.push('[');
+                    rec(body, names, next, weave, o);
+                    o.push_str("] ");
+                }
+                Tok::Dict(body) => {
+                    o.push_str("{ ");
+                    rec(body, names, next, weave, o);
+                    o.push_str("} ");
                 }
             }
         }

@@ -72,20 +72,20 @@ no imports, no declarations:
 
 ```
 fi:  row! 128 'fe for ret
-fe:  col! row@ 128 * col@ + ix!
-     ^A@ ix@ row@ col@ + set
-     ^B@ ix@ row@ col@ - set ret
+fe:  col! row@ 128 mul col@ add ix!
+     ^A@ ix@ row@ col@ add set
+     ^B@ ix@ row@ col@ sub set ret
 cr:  row! 128 'dc for ret
 dc:  col! 0 acc! 128 'ij for
-     ^C@ row@ 128 * col@ + acc@ set ret
-ij:  j! ^A@ row@ 128 * j@ + get
-     ^B@ j@ 128 * col@ + get
-     * acc@ + acc! ret
+     ^C@ row@ 128 mul col@ add acc@ set ret
+ij:  j! ^A@ row@ 128 mul j@ add get
+     ^B@ j@ 128 mul col@ add get
+     mul acc@ add acc! ret
 entry:
-  16384 arr int ^A! 16384 arr int ^B! 16384 arr int ^C!
+  16384 int array ^A! 16384 int array ^B! 16384 int array ^C!
   128 'fi for
   128 'cr for
-  ...
+  ret
 ```
 
 ## Examples
@@ -93,10 +93,10 @@ entry:
 | File | What it shows |
 |------|---------------|
 | `examples/hello.uf` | Minimal print |
-| `examples/fib.uf` | Iterative Fibonacci (dense encoding) |
+| `examples/fib.uft` | Iterative Fibonacci |
 | `examples/dot.uf` | Typed arrays, vectorized dot product |
 | `examples/maptest.uf` | Dict operations |
-| `examples/ring.uf` | Channels and `spawn` |
+| `examples/ring.uft` | Channels and `spawn` |
 | `examples/shelltest.uf` | Shell, streaming pipelines, `exec` |
 | `examples/text/matmul.uft` | Matrix multiply (text encoding) |
 | `examples/text/chat.uft` | Multi-user HTTP chat server (concurrency, FFI, SSE) |

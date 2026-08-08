@@ -8,3 +8,7 @@ comp/target/
 bench/data/
 bench/results/
 .bench-venv/
+
+# integration-test fixtures (t08 writes/reads these)
+tests/out.txt
+tests/fem.txt

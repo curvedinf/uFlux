@@ -1,0 +1,4 @@
+INFO: ok
+ERROR: timeout at 1
+WARN: x
+ERROR: timeout at 2

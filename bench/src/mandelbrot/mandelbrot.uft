@@ -1,41 +1,33 @@
-; mandelbrot.uft — counts bounded points in the mandelbrot set
-; Uses a float array for inner-loop state to avoid pass-through accumulation
-; in inlined while bodies (vset has no pass-through, unlike local !).
-entry
+; mandelbrot.uft — v13: mandelbrot escape count (bench/SPEC.md)
 1000 n!
-hasargs 'setn if
-5 _arr float st!
-0 count!
-n@ 'ybody for
-count@ "%d" fmt print
+has_args 'argn if
+5 float array z!
+0 cnt!
+n@ 'row for
+cnt@ "%d" format print
 ret
-
-ybody:
-k!
-st@ 3 2.0 k@ * n@ div 1.0 - vset
-n@ 'xbody for
-ret
-
-xbody:
-k!
-st@ 2 2.0 k@ * n@ div 1.5 - vset
-st@ 0 0.0 vset
-st@ 1 0.0 vset
-0 i!
-'icond 'ibody while
-st@ 0 vget st@ 0 vget * st@ 1 vget st@ 1 vget * + 4.0 gt not count@ + count!
-ret
-
-icond:
-i@ 50 lt st@ 0 vget st@ 0 vget * st@ 1 vget st@ 1 vget * + 4.0 gt not and ret
-
-ibody:
-st@ 4 st@ 0 vget st@ 0 vget * st@ 1 vget st@ 1 vget * - st@ 2 vget + vset
-st@ 1 st@ 0 vget st@ 1 vget 2.0 * * st@ 3 vget + vset
-st@ 0 st@ 4 vget vset
-i@ inc i!
-0 ret
-
-setn:
-1 argi n!
-0 ret
+argn:
+  1 arg_index n!
+  ret
+row: k!
+  z@ 3 2.0 k@ mul n@ div 1.0 sub array_set
+  n@ 'col for
+  ret
+col: k!
+  z@ 2 2.0 k@ mul n@ div 1.5 sub array_set
+  z@ 0 0.0 array_set
+  z@ 1 0.0 array_set
+  0 it!
+  'cond 'body while
+  z@ 0 array_get z@ 0 array_get mul z@ 1 array_get z@ 1 array_get mul add 4.0 gt not cnt@ add cnt!
+  ret
+cond:
+  it@ 50 lt z@ 0 array_get z@ 0 array_get mul z@ 1 array_get z@ 1 array_get mul add 4.0 gt not and
+  ret
+body:
+  z@ 4 z@ 0 array_get z@ 0 array_get mul z@ 1 array_get z@ 1 array_get mul sub z@ 2 array_get add array_set
+  z@ 1 z@ 0 array_get z@ 1 array_get 2.0 mul mul z@ 3 array_get add array_set
+  z@ 0 z@ 4 array_get array_set
+  it@ inc it!
+  0
+  ret

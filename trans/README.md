@@ -5,10 +5,10 @@ lexer (the `match` op) plus a hand-rolled recursive-descent parser that reads a
 C source file and prints **v11 text-encoding** µFlux source (per
 `../SPEC.md`) to stdout.
 
-> **v12 status:** `trans/trans.uf` is still written in µFlux v11 syntax and
-> uses removed opcodes (`dup`, `drop`, `swp`, `call`). It cannot be compiled by
-> the v12 compiler until it is ported. The rest of the repository (compiler,
-> runtime, examples, modules) is v12.
+> **v13 status:** `trans/trans.uf` is still written in µFlux v11 syntax and
+> uses removed opcodes (`dup`, `drop`, `swp`, `call`) plus v11 text mnemonics.
+> It cannot be compiled by the v13 compiler until it is ported. The rest of the
+> repository (compiler, runtime, examples, modules) is v13.
 
 ## Usage
 

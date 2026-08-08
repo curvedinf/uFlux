@@ -1,58 +1,45 @@
-fl:
-nf! acc!
-^first@ 'hdr 'proc ifelse
-acc@ ret
-hdr:
-0 ^first!
-ret
-proc:
-^rr@ 2 10 fatof faddto
-^pr@ 4 10 fatof faddto
-^cr@ 3 10 fatof faddto
-^gd@ "u" 7 fatoi addto
-^gd@ "t" 10 fatof addto
-^gd@ "l" 1 addto
-ret
-emitrow:
-idx!
-curdict@ n@ topn pairs!
-pairs@ idx@ get kv!
-kv@ 0 get name!
-kv@ 1 get val!
-rank@ 1 + rank!
-prefix@ rank@ name@ val@ "%s%d: %s $%.2f" fmt print
-ret
-useargv:
-argv 1 get p!
-0 ret
-entry
-0 ^rows! 1 ^first!
-dict ^gd!
-"r" 0 ^gd@ set
-"t" 0.0 ^gd@ set
-"l" 0 ^gd@ set
-"u" 0 ^gd@ set
-dict ^rr!
-dict ^pr!
-dict ^cr!
-"bench/data/sales.csv" p!
-hasargs 'useargv if
-p@ "," 0 'fl fsplit
+; analytics.uft — v13: sales CSV analytics (bench/SPEC.md)
+; Columns: [2] region, [3] country, [4] product, [7] units, [10] total
+0 ^rows! 0.0 ^rev! 0 ^units!
+dict ^region_d! dict ^prod_d! dict ^country_d!
+1 ^first!
+argv 1 get f!
+f@ "," 0 'row file_split_lines
 "=== DATA ANALYTICS RESULTS ===" print
-^gd@ "l" getq "total_rows: %d" fmt print
-^gd@ "t" getq "total_revenue: %.2f" fmt print
-^gd@ "t" getq ^gd@ "l" getq div "avg_order: %.2f" fmt print
-^gd@ "u" getq "total_units: %d" fmt print
-"region_" prefix!
-^rr@ curdict! 6 n! 0 rank!
-curdict@ n@ topn pairs!
-pairs@ len 'emitrow for
-"product_" prefix!
-^pr@ curdict! 5 n! 0 rank!
-curdict@ n@ topn pairs!
-pairs@ len 'emitrow for
-"country_" prefix!
-^cr@ curdict! 3 n! 0 rank!
-curdict@ n@ topn pairs!
-pairs@ len 'emitrow for
+^rows@ "total_rows: %d" format print
+^rev@ "total_revenue: %.2f" format print
+^rev@ ^rows@ div "avg_order: %.2f" format print
+^units@ "total_units: %d" format print
+^region_d@ 6 top_n rl!
+rl@ length 'rp for
+^prod_d@ 5 top_n pl!
+pl@ length 'pp for
+^country_d@ 3 top_n cl!
+cl@ length 'cp for
 ret
+row: acc! n!
+  ^first@ 'reset 'accum if_else
+  ret acc@
+reset:
+  0 ^first!
+  ret
+accum:
+  ^rows@ 1 add ^rows!
+  ^region_d@ 2 10 field_float field_add_to
+  ^prod_d@ 4 10 field_float field_add_to
+  ^country_d@ 3 10 field_float field_add_to
+  ^rev@ 10 field_float add ^rev!
+  ^units@ 7 field_int add ^units!
+  ret
+rp: k! rl@ k@ get p!
+  p@ 0 get nm! p@ 1 get v!
+  k@ 1 add nm@ v@ "region_%d: %s $%.2f" format print
+  ret 0
+pp: k! pl@ k@ get p!
+  p@ 0 get nm! p@ 1 get v!
+  k@ 1 add nm@ v@ "product_%d: %s $%.2f" format print
+  ret 0
+cp: k! cl@ k@ get p!
+  p@ 0 get nm! p@ 1 get v!
+  k@ 1 add nm@ v@ "country_%d: %s $%.2f" format print
+  ret 0
