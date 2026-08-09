@@ -319,6 +319,7 @@ pub fn emit_range(
     reg: &HashMap<usize, (String, VType)>,
     numeric: &std::collections::HashSet<usize>,
     arr_ptr: &HashMap<String, String>,
+    suppress_flush: bool,
 ) {
     let resolve = |name: &str| -> usize {
         *p.labels.get(name).unwrap_or_else(|| panic!("undefined label {}", name))
@@ -601,7 +602,7 @@ pub fn emit_range(
                                         e.push_str("{Cell _ff_acc=pop(cx),_ff_p=pop(cx);FILE*_fp=fopen(uf_sptr(_ff_p),\"r\");if(!_fp)die(\"FFOLD: cannot open file\");char*_line=0;size_t _ncap=0;ssize_t m;long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_FF_C_");
                                         e.push_str(&format!("{}{};cx->loops[fr].end=&&K_FF_E_{}{};long _ff_base=cx->sp;while((m=getline(&_line,&_ncap,_fp))>=0){{while(m>0&&(_line[m-1]=='\\n'||_line[m-1]=='\\r'))_line[--m]=0;Cell _ls=uf_str_new(_line,(size_t)m);pushc(cx,_ff_acc);pushc(cx,_ls);\n", prefix, i, prefix, i));
                                         let inner = format!("{}FF{}_", prefix, i);
-                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, outlined_bodies, suppress, ext_idx, bs, be, &inner, depth + 1, local_types, ins_body, &HashMap::new(), &std::collections::HashSet::new(), &HashMap::new());
+                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, outlined_bodies, suppress, ext_idx, bs, be, &inner, depth + 1, local_types, ins_body, &HashMap::new(), &std::collections::HashSet::new(), &HashMap::new(), false);
                                         e.push_str(&format!("K_FF_C_{}{}:;_ff_acc=pop(cx);cx->sp=_ff_base+1;}}K_FF_E_{}{}:;cx->lsp=fr;free(_line);fclose(_fp);pushc(cx,_ff_acc);}}\n", prefix, i, prefix, i));
                                     } else if *h == "op_fsplit" {
                                         /* inlined FSPLIT: getline loop + in-place split + field offsets + callback */
@@ -614,13 +615,13 @@ pub fn emit_range(
                                         e.push_str("while(uf_fsplit_nfields<128){char*_sp=strstr(_cur,_E);if(!_sp){uf_fsplit_offsets[uf_fsplit_nfields*2]=(int64_t)(_cur-_line);uf_fsplit_offsets[uf_fsplit_nfields*2+1]=(int64_t)strlen(_cur);uf_fsplit_nfields++;break;}*_sp=0;uf_fsplit_offsets[uf_fsplit_nfields*2]=(int64_t)(_cur-_line);uf_fsplit_offsets[uf_fsplit_nfields*2+1]=(int64_t)(_sp-_cur);uf_fsplit_nfields++;_cur=_sp+_el;}\n");
                                         e.push_str("pushc(cx,_ff_acc);pushi(cx,uf_fsplit_nfields);\n");
                                         let inner = format!("{}FF{}_", prefix, i);
-                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, outlined_bodies, suppress, ext_idx, bs, be, &inner, depth + 1, local_types, ins_body, &HashMap::new(), &std::collections::HashSet::new(), &HashMap::new());
+                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, outlined_bodies, suppress, ext_idx, bs, be, &inner, depth + 1, local_types, ins_body, &HashMap::new(), &std::collections::HashSet::new(), &HashMap::new(), false);
                                         e.push_str(&format!("K_FF_C_{}{}:;_ff_acc=pop(cx);cx->sp=_ff_base+1;}}K_FF_E_{}{}:;cx->lsp=fr;free(_line);fclose(_fp);uf_fsplit_line=0;pushc(cx,_ff_acc);}}\n", prefix, i, prefix, i));
                                     } else if *h == "op_rangefold" {
                                         /* inlined RANGEFOLD: count loop + callback */
                                         e.push_str(&format!("{{Cell _rf_acc=pop(cx);int64_t _rf_cnt=uf_i(pop(cx));long fr=cx->lsp++;if(cx->lsp>=64)die(\"loops nested too deep\");cx->loops[fr].cspl=cx->csp;cx->loops[fr].cont=&&K_RF_C_{}{};cx->loops[fr].end=&&K_RF_E_{}{};long _rf_base=cx->sp;for(int64_t _rf_k=0;_rf_k<_rf_cnt;_rf_k++){{pushc(cx,_rf_acc);pushi(cx,_rf_k);\n", prefix, i, prefix, i));
                                         let inner = format!("{}RF{}_", prefix, i);
-                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, outlined_bodies, suppress, ext_idx, bs, be, &inner, depth + 1, local_types, ins_body, &HashMap::new(), &std::collections::HashSet::new(), &HashMap::new());
+                                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, outlined_bodies, suppress, ext_idx, bs, be, &inner, depth + 1, local_types, ins_body, &HashMap::new(), &std::collections::HashSet::new(), &HashMap::new(), false);
                                         e.push_str(&format!("K_RF_C_{}{}:;_rf_acc=pop(cx);cx->sp=_rf_base+1;}}K_RF_E_{}{}:;cx->lsp=fr;pushc(cx,_rf_acc);}}\n", prefix, i, prefix, i));
                                     }
                                 }
@@ -801,7 +802,7 @@ pub fn emit_range(
                         }
                         let eff_bs = if reg_store.is_some() { bs + 1 } else { bs };
                         let inner = format!("{}F{}_", prefix, i);
-                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, outlined_bodies, suppress, ext_idx, eff_bs, be, &inner, depth + 1, local_types, ins_body, &reg, numeric, &arr_ptr);
+                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, outlined_bodies, suppress, ext_idx, eff_bs, be, &inner, depth + 1, local_types, ins_body, &reg, numeric, &arr_ptr, false);
                         e.push_str(&format!("K_FC_{}{}:;cx->sp=_sp0;}}\nK_FE_{}{}:;", prefix, i, prefix, i));
                         for (id, (name, ty)) in &regs {
                             if inherited.contains(id) { continue; }
@@ -1099,7 +1100,7 @@ pub fn emit_range(
                         // plain typed value push, peel it into a direct C test
                         // and skip the data-stack round trip entirely.
                         let mut ce = String::new();
-                        emit_range(&mut ce, p, targets, inline_fors, inline_ffolds, inline_whiles, outlined_bodies, suppress, ext_idx, cbs, cbe_trim, &inner_c, depth + 1, local_types, ins_body, &reg, numeric, &arr_ptr);
+                        emit_range(&mut ce, p, targets, inline_fors, inline_ffolds, inline_whiles, outlined_bodies, suppress, ext_idx, cbs, cbe_trim, &inner_c, depth + 1, local_types, ins_body, &reg, numeric, &arr_ptr, false);
                         let mut direct_cond: Option<String> = None;
                         if ce.ends_with(");") {
                             for tag in ["pushi(cx,", "pushf(cx,"] {
@@ -1131,8 +1132,45 @@ pub fn emit_range(
                             None => e.push_str(&format!("}}_wc=pop(cx);if(uf_zero(_wc))goto K_WE_{}{};\n", prefix, i)),
                         }
                         e.push_str("{\n");
-                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, outlined_bodies, suppress, ext_idx, bbs, bbe_trim, &inner_b, depth + 1, local_types, ins_body, &reg, numeric, &arr_ptr);
-                        e.push_str(&format!("}}cx->sp=_sp0;goto K_WC_{}{};}}\nK_WE_{}{}:;", prefix, i, prefix, i));
+                        // Dead-flush suppression: the loop's `cx->sp=_sp0`
+                        // discards everything the body pushed, so in a
+                        // register-cached (non-escapable) body the @flush and
+                        // end-of-range pushes are pure overhead (each is a real
+                        // pushc call + a memory round trip for the accumulator).
+                        // Suppress them only when nothing can read the ds:
+                        // no list/dict literals (they build from the ds) and the
+                        // ret operand starts with a push (a leading bare pop
+                        // would read the @flush strays).
+                        let body_esc = UF_DEBUG.load(Ordering::Relaxed) || (bbs..bbe_trim).any(|k| match &p.ins[k] {
+                            Ins::Break | Ins::Cont | Ins::Call(_) | Ins::CallExt(_) | Ins::Sys(_) |
+                            Ins::Weave(_) | Ins::Send | Ins::Goto(_) | Ins::While | Ins::For |
+                            Ins::If | Ins::IfElse | Ins::PushAddr(_) => true,
+                            Ins::Simple(h) => *h == "op_ffold" || *h == "op_fsplit",
+                            _ => false,
+                        });
+                        let last_flush = (bbs..bbe_trim).rev().find(|&k| matches!(p.ins[k], Ins::Flush));
+                        let operand_push_first = match last_flush {
+                            Some(f) => f + 1 >= bbe_trim || matches!(p.ins[f + 1],
+                                Ins::PushI(_) | Ins::PushF(_) | Ins::PushS(_) |
+                                Ins::LocalGetI(_) | Ins::PushAddr(_) | Ins::GetV(_)),
+                            None => true,
+                        };
+                        let body_suppress = !body_esc && operand_push_first
+                            && !(bbs..bbe_trim).any(|k| matches!(p.ins[k], Ins::ListLit | Ins::DictLit));
+                        emit_range(&mut e, p, targets, inline_fors, inline_ffolds, inline_whiles, outlined_bodies, suppress, ext_idx, bbs, bbe_trim, &inner_b, depth + 1, local_types, ins_body, &reg, numeric, &arr_ptr, body_suppress);
+                        // With dead-flush suppression active the body never
+                        // touches the data stack (no pushes, and a `pop(cx)`
+                        // would mean a vpop-empty the suppression guards
+                        // against), so cx->sp stays == _sp0 for the whole loop
+                        // and the per-iteration reset is a redundant memory
+                        // store that also forces GCC to spill loop
+                        // accumulators. Drop it; sp is already correct at exit.
+                        let sp_stable = body_suppress && !e.contains("pop(cx)");
+                        if sp_stable {
+                            e.push_str(&format!("}}goto K_WC_{}{};}}\nK_WE_{}{}:;", prefix, i, prefix, i));
+                        } else {
+                            e.push_str(&format!("}}cx->sp=_sp0;goto K_WC_{}{};}}\nK_WE_{}{}:;", prefix, i, prefix, i));
+                        }
                         for (id, (name, ty)) in &regs {
                             match ty {
                                 VType::Int => e.push_str(&format!("cx->locals[cx->local_base+{}]=uf_mki({});", id, name)),
@@ -1324,7 +1362,9 @@ pub fn emit_range(
             Ins::Flush => {
                 // v13: ret-operand boundary — spill the vstack to the real
                 // stack so the ret's count rule sees only the operand's values
-                vflush(&mut e, &mut vstack, &mut vcache);
+                if !suppress_flush {
+                    vflush(&mut e, &mut vstack, &mut vcache);
+                }
             }
             Ins::ListStart | Ins::DictStart => {
                 // v13: save the ds pointer at the literal start. Values pushed
@@ -1425,6 +1465,16 @@ pub fn emit_range(
     if prefix.is_empty() {
         // v12 top-level: auto-discard any unbound values left on the stack
         vdiscard(&mut e, &mut vstack, &mut vcache);
+    } else if suppress_flush {
+        // Inlined register-cached loop body: values left on the vstack are
+        // provably dead (the loop's `cx->sp=_sp0` discards them right after),
+        // so skip the ds pushes entirely. Dirty var caches must still be
+        // written back (vflush drains both).
+        for (v, t, d) in vcache.drain(..) {
+            if d {
+                e.push_str(&format!("var_{}={};", v, t));
+            }
+        }
     } else {
         vflush(&mut e, &mut vstack, &mut vcache);
     }
@@ -2201,18 +2251,16 @@ pub fn gen(p: &Parsed, structs: &StructMap, debug: bool) -> String {
     // Compute types and body mapping BEFORE outlined-body detection so we
     // can find the full extent of each call body (including continuation labels).
     let (mut local_types, ins_body, numeric_slots) = compute_local_types(p);
-    
+
     // Outlined call bodies: detect call bodies that use locals and contain
     // while loops but don't call other uf bodies (only externs). These are
     // emitted as separate C functions so GCC's register allocator handles
     // the hot inner loops without being overwhelmed by the monolithic
     // dispatch function's register pressure.
     let mut outlined_bodies: HashMap<usize, (usize, usize)> = HashMap::new(); // call_pc -> (body_start, body_end)
-    let mut outlined_emitted: std::collections::HashSet<usize> = std::collections::HashSet::new(); // body_starts already emitted
     for j in 1..p.ins.len() {
         if let Ins::Call(l) = &p.ins[j] {
             let bs = resolve(l);
-            if outlined_emitted.contains(&bs) { continue; }
             // Find the full body extent using ins_body: all instructions k
             // where ins_body[k] == bs form the body (including continuation
             // labels like while-cond/while-body that belong to this body).
@@ -2237,14 +2285,21 @@ pub fn gen(p: &Parsed, structs: &StructMap, debug: bool) -> String {
             // suppressed and fine — they never use the call-stack mechanism)
             let has_pushaddr = (bs..be).any(|k| matches!(&p.ins[k], Ins::PushAddr(_)) && !suppress.contains(&k));
             if has_pushaddr { continue; }
+            // Outline EVERY call site of the label (not just the first): the
+            // threaded `goto L_` fallback runs the loop inside the monolithic
+            // uflux_run where GCC's register allocator degrades, so any
+            // additional call site must also go through the small function.
             outlined_bodies.insert(j, (bs, be));
-            outlined_emitted.insert(bs);
         }
     }
 
-    // Emit outlined body functions BEFORE uflux_run
+    // Emit outlined body functions BEFORE uflux_run (one per body_start, even
+    // if multiple call sites share it)
     let mut outlined_fns = String::new();
+    let mut outlined_emitted: std::collections::HashSet<usize> = std::collections::HashSet::new(); // body_starts already emitted
     for (&_call_pc, &(bs, be)) in &outlined_bodies {
+        if outlined_emitted.contains(&bs) { continue; }
+        outlined_emitted.insert(bs);
         let fname = format!("uf_ob_{}", bs);
         let lc = p.local_counts.get(&bs).copied().unwrap_or(0);
         let oarity = p.label_params.get(&bs).map(|v| v.len()).unwrap_or(0);
@@ -2258,7 +2313,7 @@ pub fn gen(p: &Parsed, structs: &StructMap, debug: bool) -> String {
         let ob_prefix = format!("OB{}_", bs);
         // Emit the body code — use empty reg/arr_ptr maps; the inlined while
         // loops within the body will do their own register caching.
-        emit_range(&mut outlined_fns, p, &targets, &inline_fors, &inline_ffolds, &inline_whiles, &outlined_bodies, &suppress, &ext_idx, bs, be, &ob_prefix, 0, &mut local_types, &ins_body, &HashMap::new(), &numeric_slots, &HashMap::new());
+        emit_range(&mut outlined_fns, p, &targets, &inline_fors, &inline_ffolds, &inline_whiles, &outlined_bodies, &suppress, &ext_idx, bs, be, &ob_prefix, 0, &mut local_types, &ins_body, &HashMap::new(), &numeric_slots, &HashMap::new(), false);
         // If the body has no explicit RET at the end (shouldn't happen, but
         // be safe), restore the frame.
         outlined_fns.push_str(&format!("cx->local_base=cx->local_frames[--cx->local_fsp];{}}}\n", if UF_DEBUG.load(Ordering::Relaxed) { "cx->call_csp--;" } else { "" }));
@@ -2275,7 +2330,7 @@ pub fn gen(p: &Parsed, structs: &StructMap, debug: bool) -> String {
         });
         o.insert_str(insert_pos, &outlined_fns);
     }
-    emit_range(&mut o, p, &targets, &inline_fors, &inline_ffolds, &inline_whiles, &outlined_bodies, &suppress, &ext_idx, 0, n, "", 0, &mut local_types, &ins_body, &HashMap::new(), &numeric_slots, &HashMap::new());
+    emit_range(&mut o, p, &targets, &inline_fors, &inline_ffolds, &inline_whiles, &outlined_bodies, &suppress, &ext_idx, 0, n, "", 0, &mut local_types, &ins_body, &HashMap::new(), &numeric_slots, &HashMap::new(), false);
     o.push_str(&format!("L_{}: return;\n}}\n", n));
 
     // exported wrappers (fixed 4-arg C ABI trampoline, run on the main ctx)

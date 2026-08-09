@@ -25,10 +25,11 @@ reset:
   ret
 accum:
   ^rows@ 1 add ^rows!
-  ^region_d@ 2 10 field_float field_add_to
-  ^prod_d@ 4 10 field_float field_add_to
-  ^country_d@ 3 10 field_float field_add_to
-  ^rev@ 10 field_float add ^rev!
+  10 field_float t!
+  ^rev@ t@ add ^rev!
+  ^region_d@ 2 t@ field_add_to
+  ^prod_d@ 4 t@ field_add_to
+  ^country_d@ 3 t@ field_add_to
   ^units@ 7 field_int add ^units!
   ret
 rp: k! rl@ k@ get p!

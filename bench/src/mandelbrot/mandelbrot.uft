@@ -1,7 +1,8 @@
-; mandelbrot.uft — v13: mandelbrot escape count (bench/SPEC.md)
+; mandelbrot.uft — v13: mandelbrot escape count (bench/SPEC.md).
+; esc(cx,cy) runs the iteration with zr/zi in register-cached locals inside
+; an outlined function — no array traffic, tight loop.
 1000 n!
 has_args 'argn if
-5 float array z!
 0 cnt!
 n@ 'row for
 cnt@ "%d" format print
@@ -10,24 +11,28 @@ argn:
   1 arg_index n!
   ret
 row: k!
-  z@ 3 2.0 k@ mul n@ div 1.0 sub array_set
+  2.0 k@ mul n@ div 1.0 sub cy!
   n@ 'col for
   ret
 col: k!
-  z@ 2 2.0 k@ mul n@ div 1.5 sub array_set
-  z@ 0 0.0 array_set
-  z@ 1 0.0 array_set
-  0 it!
-  'cond 'body while
-  z@ 0 array_get z@ 0 array_get mul z@ 1 array_get z@ 1 array_get mul add 4.0 gt not cnt@ add cnt!
+  2.0 k@ mul n@ div 1.5 sub cx!
+  cx@ cy@ _call esc
+  cnt@ add cnt!
   ret
-cond:
-  it@ 50 lt z@ 0 array_get z@ 0 array_get mul z@ 1 array_get z@ 1 array_get mul add 4.0 gt not and
+; esc(cx,cy): zr←zr²-zi²+cx, zi←2·zr·zi+cy for up to 50 iters;
+; returns 1 if the point stayed bounded (zr²+zi²<=4), else 0.
+esc: cx! cy!
+  0.0 zr! 0.0 zi! 0 it!
+  'ec 'eb while
+  zr@ zr@ mul zi@ zi@ mul add 4.0 gt not
   ret
-body:
-  z@ 4 z@ 0 array_get z@ 0 array_get mul z@ 1 array_get z@ 1 array_get mul sub z@ 2 array_get add array_set
-  z@ 1 z@ 0 array_get z@ 1 array_get 2.0 mul mul z@ 3 array_get add array_set
-  z@ 0 z@ 4 array_get array_set
+ec:
+  it@ 50 lt zr@ zr@ mul zi@ zi@ mul add 4.0 gt not and
+  ret
+eb:
+  zr@ zr@ mul zi@ zi@ mul sub cx@ add nzr!
+  zr@ zi@ 2.0 mul mul cy@ add zi!
+  nzr@ zr!
   it@ inc it!
   0
   ret
